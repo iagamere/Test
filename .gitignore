@@ -1,0 +1,6 @@
+PS4Monitor-apk/
+*.apk
+build/
+.gradle/
+local.properties
+.idea/

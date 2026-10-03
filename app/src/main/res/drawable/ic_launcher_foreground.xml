@@ -1,0 +1,9 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- progress ring (3/4 filled): the "monitor" -->
+    <path android:pathData="M54,24A30,30 0 1,1 24,54" android:strokeColor="#FFDCCBFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <!-- download arrow -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M49,34h10v18h8L54,66 41,52h8z"/>
+    <!-- tray -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M41,71h26a2.5,2.5 0 0 1 0,5h-26a2.5,2.5 0 0 1 0,-5z"/>
+</vector>
