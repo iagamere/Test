@@ -73,35 +73,13 @@ import kotlinx.coroutines.launch
             Button(onClick = { ctx.startActivity(Intent(AndroidSettings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }) { Lbl(tr("Battery settings", "إعدادات البطارية")) }
         } }
         item { NavRow(R.drawable.ic_search, tr("Advanced", "متقدم"), tr("Debug log, history", "سجل التصحيح، السجل القديم")) { nav.navigate("settings/advanced") } }
-        item { Dim("PS4 Download Monitor 3.1") }
+        item { Dim("PS4 Download Monitor 3.0") }
     }
 }
 
 @Composable fun AdvancedScreen(nav: NavController) {
-    val ctx = LocalContext.current; val scope = rememberCoroutineScope()
-    var bgPath by remember { mutableStateOf(Store.sp.getString("bgpath", "").orEmpty()) }
-    var bgPause by remember { mutableIntStateOf(Store.sp.getInt("bgpause", 5)) }
-    var bgResume by remember { mutableIntStateOf(Store.sp.getInt("bgresume", 1)) }
-    var bgDetect by remember { mutableIntStateOf(Store.sp.getInt("bgdetect", 5)) }
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BackHeader(tr("Advanced", "متقدم"), nav)
-        Panel {
-            SectionTitle(tr("ezRemote history file", "ملف سجل ezRemote"))
-            Dim(tr("bg_download_history.json gives the exact file size and lets this app pause / resume a download by changing only failed_attempts.",
-                   "ملف bg_download_history.json يعطي الحجم الدقيق ويتيح إيقاف التحميل واستئنافه بتغيير failed_attempts فقط."))
-            OutlinedTextField(bgPath, { bgPath = it; Store.sp.edit().putString("bgpath", it.trim()).apply() },
-                label = { Text(tr("Full path (empty = search /data automatically)", "المسار الكامل (فارغ = بحث تلقائي في /data)")) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Button(onClick = { scope.launch {
-                val p = Ps4Repo.active()
-                val msg = if (p == null) tr("No PS4 profile yet.", "لا يوجد ملف PS4 بعد.") else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BgHistory.test(p) }
-                android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
-            } }) { Lbl(tr("Find and read the file now", "ابحث عن الملف واقرأه الآن")) }
-            Text(tr("Value written to pause", "القيمة المكتوبة للإيقاف")); Chips(listOf(3, 4, 5, 6), bgPause, "") { bgPause = it; Store.putInt("bgpause", it) }
-            Text(tr("Value written to resume", "القيمة المكتوبة للاستئناف")); Chips(listOf(0, 1, 2), bgResume, "") { bgResume = it; Store.putInt("bgresume", it) }
-            Text(tr("Shown as paused when failed_attempts is at least", "يُعرض كمتوقف عندما يبلغ failed_attempts")); Chips(listOf(3, 4, 5), bgDetect, "") { bgDetect = it; Store.putInt("bgdetect", it) }
-            Dim(tr("A copy of the file is kept on the phone before every change. If the limit is really 3 on your PS4, set the last option to 3.",
-                   "تُحفظ نسخة من الملف على الهاتف قبل كل تعديل. إن كان الحد الفعلي 3 في جهازك فاجعل الخيار الأخير 3."))
-        }
         Panel {
             ToggleRow(tr("Add .pkg automatically to finished PKG files that lack it", "إضافة .pkg تلقائيًا لملفات PKG المكتملة التي تفتقده"), "autopkg", true)
             Dim(tr("Only real PS4 PKG files (checked by their header) are renamed, through ezRemote, and the result is verified.", "تُعاد تسمية ملفات PKG الحقيقية فقط (يُفحص ترويستها) عبر ezRemote ويُتحقق من النتيجة."))

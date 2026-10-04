@@ -132,7 +132,8 @@ object DownloadRepo {
                 .put("started", d.startedAt).put("completed", d.completedAt).put("seen", d.lastSeenAt)
                 .put("err", d.errorMessage ?: JSONObject.NULL).put("nid", d.notificationId)
                 .put("base", d.baseline?.let { b -> JSONObject().also { o -> b.forEach { (k, v) -> o.put(k, v) } } } ?: JSONObject.NULL)
-                .put("fname", d.fileName ?: JSONObject.NULL).put("ptitle", d.pkgTitle ?: JSONObject.NULL).put("ptid", d.titleId ?: JSONObject.NULL).put("icon", d.iconReady).put("sup", d.superseded).put("tn", d.terminalNotified).put("upd", d.updatedAt))
+                .put("fname", d.fileName ?: JSONObject.NULL).put("ptitle", d.pkgTitle ?: JSONObject.NULL).put("ptid", d.titleId ?: JSONObject.NULL).put("icon", d.iconReady).put("sup", d.superseded).put("tn", d.terminalNotified).put("upd", d.updatedAt)
+                .put("bgId", d.bgId).put("bgFail", d.bgFailedAttempts).put("bgState", d.bgState))
         }
         Store.secure.edit().putString("downloads", arr.toString()).apply()
     }
@@ -141,14 +142,17 @@ object DownloadRepo {
         all.value = (0 until a.length()).mapNotNull { i -> runCatching {
             val o = a.getJSONObject(i)
             fun s(k: String) = if (o.isNull(k)) null else o.getString(k)
+            // Unknown states from older builds fall back to STOPPED so load never crashes.
+            val st = runCatching { DlState.valueOf(o.getString("state")) }.getOrDefault(DlState.STOPPED)
             Download(o.getString("id"), o.getString("ps4"), o.optInt("att", 1), s("retryOf"), o.getString("url"),
                 o.getString("name"), o.getString("dest"), s("tmp"), s("fin"),
                 if (o.isNull("exp")) null else o.getLong("exp"), o.optString("expSrc"),
                 o.optLong("size"), o.optDouble("speed", 0.0), o.optDouble("avg", 0.0), o.optDouble("peak", 0.0), -1,
-                DlState.valueOf(o.getString("state")), o.optString("note"), o.getLong("created"), o.optLong("submitted"),
+                st, o.optString("note"), o.getLong("created"), o.optLong("submitted"),
                 o.optLong("started"), o.optLong("completed"), o.optLong("seen"), s("err"), o.getInt("nid"),
                 if (o.isNull("base")) null else o.getJSONObject("base").let { b -> b.keys().asSequence().associateWith { k -> b.getLong(k) } },
-                o.optBoolean("sup"), o.optBoolean("tn"), o.optLong("upd", o.getLong("created")), s("ptitle"), s("ptid"), o.optBoolean("icon"), s("fname"))
+                o.optBoolean("sup"), o.optBoolean("tn"), o.optLong("upd", o.getLong("created")), s("ptitle"), s("ptid"), o.optBoolean("icon"), s("fname"),
+                emptyList(), o.optLong("bgId", 0), o.optInt("bgFail", -1), o.optInt("bgState", -1))
         }.getOrNull() }
     }
 }

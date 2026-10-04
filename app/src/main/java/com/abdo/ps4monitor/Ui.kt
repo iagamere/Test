@@ -75,8 +75,8 @@ fun stateIcon(s: DlState) = when (s) {
 @Composable fun stateColors(s: DlState): Pair<Color, Color> { val c = MaterialTheme.colorScheme; return when (s) {
     DlState.COMPLETED -> c.tertiaryContainer to c.onTertiaryContainer
     DlState.FAILED, DlState.NOT_STARTED -> c.errorContainer to c.onErrorContainer
-    DlState.STALLED, DlState.CONNECTION_LOST, DlState.PAUSED -> c.secondaryContainer to c.onSecondaryContainer
-    DlState.STOPPED -> c.surfaceContainerHighest to c.onSurfaceVariant
+    DlState.STALLED, DlState.CONNECTION_LOST -> c.secondaryContainer to c.onSecondaryContainer
+    DlState.STOPPED, DlState.PAUSED -> c.surfaceContainerHighest to c.onSurfaceVariant
     else -> c.primaryContainer to c.onPrimaryContainer } }
 
 fun resultText(r: SubmitResult) = Tx.t(when (r) {
@@ -94,10 +94,19 @@ fun resultText(r: SubmitResult) = Tx.t(when (r) {
     val ps4 = Ps4Repo.get(d.ps4Id)
     val (bg, fg) = stateColors(d.state)
     val shape = MaterialTheme.shapes.large
-    val container = if (selected == true) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow
-    Card(Modifier.fillMaxWidth().clip(shape).combinedClickable(onClick = onOpen, onLongClick = onLong), shape = shape, colors = CardDefaults.cardColors(containerColor = container)) {
+    val art by produceState<Bitmap?>(null, d.id, d.iconReady, d.tempPath, d.finalPath) { value = PkgThumbs.forDownload(d, 160) }
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.3f
+    val seed = remember(art) { seedFromBitmap(art) }
+    val artTint = remember(seed, dark) { cardTintFromSeed(seed, dark) }
+    val container = when {
+        selected == true -> MaterialTheme.colorScheme.secondaryContainer
+        artTint != null -> artTint
+        else -> MaterialTheme.colorScheme.surfaceContainerLow
+    }
+    Card(Modifier.fillMaxWidth().clip(shape).combinedClickable(onClick = onOpen, onLongClick = onLong), shape = shape,
+        colors = CardDefaults.cardColors(containerColor = container),
+        border = if (seed != null && selected != true) BorderStroke(1.dp, Color(seed).copy(alpha = 0.22f)) else null) {
         Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 14.dp, end = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            val art by produceState<Bitmap?>(null, d.id, d.iconReady, d.tempPath, d.finalPath) { value = PkgThumbs.forDownload(d, 160) }
             val pic = art
             Box(Modifier.size(56.dp)) {
                 if (pic != null) Image(pic.asImageBitmap(), null, Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)), contentScale = ContentScale.Crop)

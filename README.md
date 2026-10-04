@@ -56,9 +56,24 @@ Old Engine.kt / Sender.kt (template "Learn" workflow) were removed.
 - Long operations (Ops.kt) run in an app-level scope with the foreground service; one at a time; results verified by listing because ezRemote ignores several return values.
 - Deliberately NOT used: GET /stop (stops ezRemote), POST /compress (writes to its own folder, ignores `destination`, can answer twice), copy with `singleFilename` (only handles folders), /permission (unsupported).
 
-## 3.1 — ezRemote history file (bg_download_history.json)
-- BgHistory.kt reads ezRemote's own queue file (web getContent first, FTP fallback). The path is found automatically in /data (or set it in Settings > Advanced).
-- Exact total size (file_size) now replaces the guessed size; the download detail shows file size, bytes recorded by ezRemote, failed_attempts, state and id.
-- New state "Paused": shown when failed_attempts >= the limit (default 5, configurable) and the file is not growing.
-- Pause / Resume buttons (download detail): write failed_attempts = 5 / 1 into that single entry only (text-level patch, other bytes untouched), verify by reading again, keep a backup copy on the phone (files/bg_download_history.backup.json).
-- NOT compiled or tested here. Unknown until tested on your PS4: whether ezRemote notices a value written while it is running, and the meaning of the "state" numbers. The log (Settings > Advanced > Debug log) records every read/write.
+## 3.1 — real Pause / Resume via bg_download_history.json
+- Path (from ezremote-server `config.h`): `/data/ezremote-client/bg_download_history.json`
+- Struct fields used: `url`, `src_path`, `dest_path`, `file_size`, `bytes_transfered`, `state`, `id`, `failed_attempts`
+  Official enum: PENDING=0, DOWNLOADING=1, RESUMED=2, FAILED=3, SUCCESS=4. Official max retries = 3 (v2.02).
+- **Pause on PS4**: writes `failed_attempts = 5` (and state=FAILED) so the background downloader stops retrying. Confirmed empirically.
+- **Resume on PS4**: writes `failed_attempts = 0`. The server resumes on its next tick (may need ezRemote Server still running).
+- Monitor loop also *reads* the history file to:
+  - fill accurate `file_size` / `bytes_transfered` into Download cards
+  - auto-detect when the server itself stops retrying → show PAUSED
+  - notice a manual resume on the PS4 side and re-attach monitoring
+- New `DlState.PAUSED`. UI: "Pause on PS4" / "Resume on PS4" buttons; monitoring-only Stop remains as a secondary action.
+- Matching is by `dest_path` first, then URL / src_path. If no entry is found the app falls back to monitoring-only stop/resume.
+- Race note: ezRemote may rewrite the JSON while we edit it; write failures are soft and reported to the user.
+
+
+## 3.2 — Dynamic game colours (UI + notifications)
+- New `ArtTheme.kt`: extracts a seed colour from game artwork (icon0 / pic0 / pic1) with Palette, builds a full Material3 ColorScheme.
+- **PKG inspector**: whole screen adopts the game's colours; cinematic banner with gradient fade from pic1/pic0 into the dynamic primary container; chips tinted to secondaryContainer.
+- **Download detail**: hero card and screen colours follow the download's artwork.
+- **Download cards** (list) and **Files rows** (PKG/TMP): soft surface tint + thin border derived from the icon.
+- **Notifications** (active progress + results): `setColor` / `setColorized` from the same seed, larger large-icon (160px), category set for better system grouping.

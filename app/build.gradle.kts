@@ -8,7 +8,7 @@ android {
     compileSdk = 34
     defaultConfig {
         applicationId = "com.abdo.ps4monitor"
-        minSdk = 26; targetSdk = 34; versionCode = 9; versionName = "3.1"
+        minSdk = 26; targetSdk = 34; versionCode = 10; versionName = "3.2"
     }
     signingConfigs {
         getByName("debug") {
@@ -30,4 +30,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("commons-net:commons-net:3.10.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.palette:palette-ktx:1.0.0")
 }

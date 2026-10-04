@@ -56,18 +56,18 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
 
 @Composable fun DownloadsScreen(nav: NavController) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     val all by DownloadRepo.all.collectAsState()
     var tab by remember { mutableIntStateOf(0) }
     var sel by remember { mutableStateOf(setOf<String>()) }
     var confirm by remember { mutableStateOf<Pair<List<String>, Boolean>?>(null) }
     val active = all.filter { it.state.active }
     val done = all.filter { it.state == DlState.COMPLETED }
-    val failed = all.filter { it.state == DlState.FAILED || it.state == DlState.NOT_STARTED || it.state == DlState.STOPPED }
+    val failed = all.filter { it.state == DlState.FAILED || it.state == DlState.NOT_STARTED || it.state == DlState.STOPPED || it.state == DlState.PAUSED }
     val shown = when (tab) { 0 -> active; 1 -> done; else -> failed }.sortedByDescending { it.createdAt }
     val selIds = sel.filter { id -> shown.any { it.id == id } }       // forget anything that vanished or changed tab
     val selecting = selIds.isNotEmpty()
     BackHandler(enabled = selecting) { sel = emptySet() }
-    // No "Paused" tab: ezRemote exposes no confirmed pause API, so pausing would be fake.
     Column(Modifier.padding(horizontal = 16.dp)) {
         Row(Modifier.padding(top = 8.dp).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (selecting) {
@@ -75,7 +75,13 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
                 Text("${selIds.size} " + tr("selected", "محدد"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1)
                 IconButton(onClick = { sel = shown.map { it.id }.toSet() }) { Ico(R.drawable.ic_select_all) }
                 if (selIds.any { id -> all.firstOrNull { it.id == id }?.state?.active == true })
-                    IconButton(onClick = { selIds.forEach { id -> if (all.firstOrNull { it.id == id }?.state?.active == true) DownloadMonitor.stop(id) }; sel = emptySet(); stopToast(ctx) }) { Ico(R.drawable.ic_stop) }
+                    IconButton(onClick = {
+                        scope.launch {
+                            selIds.forEach { id -> if (all.firstOrNull { it.id == id }?.state?.active == true)
+                                Toast.makeText(ctx, DownloadMonitor.pausePs4(id), Toast.LENGTH_SHORT).show() }
+                            sel = emptySet()
+                        }
+                    }) { Ico(R.drawable.ic_stop) }
                 IconButton(onClick = { confirm = selIds to false }) { Ico(R.drawable.ic_delete, tint = MaterialTheme.colorScheme.error) }
             } else {
                 Text(tr("Downloads", "التحميلات"), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1)
@@ -84,7 +90,7 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
             }
         }
         TabRow(selectedTabIndex = tab, containerColor = Color.Transparent, divider = {}) {
-            listOf(tr("Active", "نشطة") to active.size, tr("Completed", "مكتملة") to done.size, tr("Failed", "فاشلة") to failed.size).forEachIndexed { i, (t, n) ->
+            listOf(tr("Active", "نشطة") to active.size, tr("Completed", "مكتملة") to done.size, tr("Other", "أخرى") to failed.size).forEachIndexed { i, (t, n) ->
                 Tab(tab == i, { tab = i; sel = emptySet() }, text = { Lbl("$t $n") })
             }
         }
@@ -94,7 +100,9 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
                 DownloadCard(d,
                     onOpen = { if (selecting) sel = if (d.id in sel) sel - d.id else sel + d.id else nav.navigate("downloads/${d.id}") },
                     onLong = { sel = sel + d.id }, selected = if (selecting) d.id in selIds else null,
-                    onStop = { DownloadMonitor.stop(d.id); stopToast(ctx) }, onDelete = { confirm = listOf(d.id) to false })
+                    onStop = {
+                        scope.launch { Toast.makeText(ctx, DownloadMonitor.pausePs4(d.id), Toast.LENGTH_LONG).show() }
+                    }, onDelete = { confirm = listOf(d.id) to false })
             }
         }
     }
@@ -105,25 +113,31 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
     val all by DownloadRepo.all.collectAsState()
     val untracked by DownloadMonitor.untracked.collectAsState()
     val d = all.firstOrNull { it.id == id }
-    val bgMap by BgHistory.entries.collectAsState()
-    val bgStatus by BgHistory.status.collectAsState()
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     var confirm by remember { mutableStateOf<Pair<List<String>, Boolean>?>(null) }
     var confirmInstall by remember { mutableStateOf(false) }
+    val art by produceState<Bitmap?>(null, d?.id, d?.iconReady, d?.tempPath, d?.finalPath) {
+        value = d?.let { PkgThumbs.forDownload(it, 256) }
+    }
+    ArtTheme(art) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BackHeader(tr("Download", "التحميل"), nav)
         if (d == null) { Text(tr("This download was removed.", "تم حذف هذا التحميل.")); return@Column }
         val ps4 = Ps4Repo.get(d.ps4Id)
-        val hist = bgMap[d.ps4Id]?.let { BgHistory.match(d, it) }
         val (bg, fg) = stateColors(d.state)
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            val art by produceState<Bitmap?>(null, d.id, d.iconReady, d.tempPath, d.finalPath) { value = PkgThumbs.forDownload(d, 256) }
-            val pic = art
-            if (pic != null) Image(pic.asImageBitmap(), null, Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)), contentScale = ContentScale.Crop)
-            else Box(Modifier.size(52.dp).clip(RoundedCornerShape(16.dp)).background(bg), contentAlignment = Alignment.Center) { Ico(stateIcon(d.state), 28.dp, fg) }
-            Column(Modifier.weight(1f)) {
-                Text(d.pkgTitle ?: d.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                Dim("${listOfNotNull(d.titleId).joinToString()}  ${ps4?.name ?: tr("Removed PS4", "جهاز محذوف")}  •  " + tr("attempt", "المحاولة") + " ${d.attempt}", maxLines = 1)
+        val cs = MaterialTheme.colorScheme
+        Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(containerColor = cs.primaryContainer, contentColor = cs.onPrimaryContainer)) {
+            Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                val pic = art
+                if (pic != null) Image(pic.asImageBitmap(), null,
+                    Modifier.size(88.dp).clip(RoundedCornerShape(20.dp)).border(2.dp, cs.primary.copy(alpha = 0.35f), RoundedCornerShape(20.dp)),
+                    contentScale = ContentScale.Crop)
+                else Box(Modifier.size(64.dp).clip(RoundedCornerShape(16.dp)).background(bg), contentAlignment = Alignment.Center) { Ico(stateIcon(d.state), 30.dp, fg) }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(d.pkgTitle ?: d.displayName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Dim("${listOfNotNull(d.titleId).joinToString()}  ${ps4?.name ?: tr("Removed PS4", "جهاز محذوف")}  •  " + tr("attempt", "المحاولة") + " ${d.attempt}", maxLines = 1)
+                }
             }
         }
         Panel {
@@ -154,13 +168,6 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
             Text(tr("Average (30 s): ", "المتوسط (30 ث): ") + "${Fmt.mbs(d.avgSpeed)}   " + tr("Peak: ", "الأعلى: ") + Fmt.mbs(d.peakSpeed))
             if (d.speeds.size > 1) Chart(d.speeds.map { it / 1048576f }, Modifier.fillMaxWidth().height(120.dp))
         }
-        if (hist != null) Panel {
-            Text(tr("ezRemote history file", "ملف سجل ezRemote"), fontWeight = FontWeight.SemiBold)
-            Text(tr("File size: ", "حجم الملف: ") + Fmt.bytes(hist.fileSize))
-            Text(tr("Recorded by ezRemote: ", "المسجَّل لدى ezRemote: ") + Fmt.bytes(hist.transferred) + (hist.pct?.let { "  ($it%)" } ?: ""))
-            Text("failed_attempts: ${hist.failed}   •   state: ${hist.state}")
-            Dim("id ${hist.id}")
-        } else if (d.state.active) bgStatus[d.ps4Id]?.takeIf { it.isNotBlank() }?.let { Dim(it) }
         if (d.tempPath == null && d.state.active) {
             val dir = DownloadMonitor.norm(d.dest)
             val cands = untracked[d.ps4Id].orEmpty().filter { it.first == dir }
@@ -181,15 +188,26 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
             if (d.sourceUrl.isNotBlank()) Dim(tr("Link: ", "الرابط: ") + d.sourceUrl.take(120))
             Dim(tr("Sent: ", "أُرسل: ") + Fmt.dt(d.submittedAt) + "   " + tr("Started: ", "بدأ: ") + Fmt.dt(d.startedAt) + "   " + tr("Finished: ", "انتهى: ") + Fmt.dt(d.completedAt))
         }
+        // Show bg history info when available
+        if (d.bgId != 0L || d.bgFailedAttempts >= 0) Panel {
+            Dim(tr("Background history", "سجل التحميل الخلفي") +
+                (if (d.bgId != 0L) "  #${d.bgId}" else "") +
+                (if (d.bgFailedAttempts >= 0) "  ·  failed_attempts=${d.bgFailedAttempts}" else "") +
+                (if (d.bgState >= 0) "  ·  state=${d.bgState}" else ""))
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (hist != null && (d.state.active || hist.failed >= BgHistory.detect())) {
-                if (d.state == DlState.PAUSED || hist.failed >= BgHistory.detect())
-                    Button(onClick = { scope.launch { Toast.makeText(ctx, DownloadMonitor.resumeTransfer(d.id), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_refresh, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Resume download", "استئناف التحميل")) }
-                else
-                    FilledTonalButton(onClick = { scope.launch { Toast.makeText(ctx, DownloadMonitor.pauseTransfer(d.id), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_stop, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Pause download", "إيقاف التحميل مؤقتًا")) }
-            }
-            if (d.state.active) FilledTonalButton(onClick = { DownloadMonitor.stop(d.id); stopToast(ctx) }) { Ico(R.drawable.ic_stop, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Stop", "إيقاف")) }
-            if (!d.superseded && d.sourceUrl.isNotBlank() && d.state in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED))
+            // Real pause on the PS4 via bg_download_history.json
+            if (d.state.active) FilledTonalButton(onClick = {
+                scope.launch { Toast.makeText(ctx, DownloadMonitor.pausePs4(d.id), Toast.LENGTH_LONG).show() }
+            }) { Ico(R.drawable.ic_stop, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Pause on PS4", "إيقاف على الـPS4")) }
+            // Resume on PS4 (writes failed_attempts=0) + re-attach monitoring
+            if (!d.superseded && d.state == DlState.PAUSED)
+                Button(onClick = {
+                    scope.launch { Toast.makeText(ctx, DownloadMonitor.resumePs4(d.id), Toast.LENGTH_LONG).show() }
+                }) { Ico(R.drawable.ic_refresh, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Resume on PS4", "استئناف على الـPS4")) }
+            // Monitoring-only stop (does not touch the PS4)
+            if (d.state.active) OutlinedButton(onClick = { DownloadMonitor.stop(d.id); stopToast(ctx) }) { Lbl(tr("Stop monitoring", "إيقاف المراقبة")) }
+            if (!d.superseded && d.sourceUrl.isNotBlank() && d.state in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED, DlState.PAUSED))
                 Button(onClick = { scope.launch { Toast.makeText(ctx, resultText(DownloadMonitor.retry(d.id)), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_refresh, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Retry", "إعادة المحاولة")) }
             if (!d.superseded && d.state in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED))
                 OutlinedButton(onClick = { DownloadMonitor.resume(d.id) }) { Lbl(tr("Resume monitoring", "استئناف المراقبة")) }
@@ -202,9 +220,12 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
             if (ps4 != null && PkgInspector.canRead(ps4) && (d.tempPath ?: d.finalPath) != null && (d.iconReady || (d.finalPath ?: d.tempPath).orEmpty().lowercase().contains("pkg") || d.displayName.lowercase().endsWith(".pkg")))
                 FilledTonalButton(onClick = { nav.navigate(pkgRoute(ps4.id, d.finalPath ?: d.tempPath!!)) }) { Ico(R.drawable.ic_package, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Inside the PKG", "ما بداخل الـPKG")) }
         }
-        if (d.state.active) Dim(tr("“Stop” only stops this app from watching; it does not cancel the download on the PS4 (ezRemote has no confirmed cancel API). Retry sends a NEW request and is never automatic.",
-            "«إيقاف» يوقف مراقبة التطبيق فقط ولا يلغي التحميل على الـPS4 (لا يوجد API مؤكد للإلغاء في ezRemote). إعادة المحاولة ترسل طلبًا جديدًا ولا تتم تلقائيًا."))
+        if (d.state.active) Dim(tr("“Pause on PS4” writes failed_attempts=5 into bg_download_history.json so the background downloader stops. “Stop monitoring” only stops this app from watching.",
+            "«إيقاف على الـPS4» يكتب failed_attempts=5 في bg_download_history.json فيتوقف المحمّل الخلفي. «إيقاف المراقبة» يوقف مراقبة التطبيق فقط."))
+        if (d.state == DlState.PAUSED) Dim(tr("This download is paused on the PS4. Tap “Resume on PS4” to set failed_attempts back to 0 and continue.",
+            "هذا التحميل متوقف مؤقتًا على الـPS4. اضغط «استئناف على الـPS4» لإعادة failed_attempts إلى 0 والمتابعة."))
     }
+    } // ArtTheme
     if (confirmInstall) { val p = Ps4Repo.get(d?.ps4Id); val f = d?.finalPath; if (p != null && f != null) ConfirmInstall(p, listOf(f), close = { confirmInstall = false }) }
     confirm?.let { (ids, also) -> ConfirmDelete(ids, onDone = { nav.popBackStack() }, close = { confirm = null }, defaultAlsoPs4 = also) }
 }

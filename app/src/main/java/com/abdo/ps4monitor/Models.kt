@@ -32,9 +32,10 @@ enum class DlState(private val en: String, private val ar: String, val active: B
     STARTING("Starting", "جارٍ البدء", true),
     DOWNLOADING("Downloading", "جارٍ التحميل", true),
     STALLED("Stalled", "متعثّر", true),
-    PAUSED("Paused", "متوقف مؤقتًا", true),                 // ezRemote history file says failed_attempts >= limit (or the user paused it)
     CONNECTION_LOST("Connection lost", "انقطع الاتصال", true),
     VERIFYING("Verifying", "جارٍ التحقق", true),
+    /** Real pause via bg_download_history.json (failed_attempts forced high). The PS4 downloader stops retrying. */
+    PAUSED("Paused", "متوقف مؤقتًا", false),
     COMPLETED("Completed", "اكتمل", false),
     FAILED("Failed", "فشل", false),
     STOPPED("Monitoring stopped", "أُوقفت المراقبة", false),
@@ -58,7 +59,13 @@ data class Download(
     val updatedAt: Long = createdAt,
     val pkgTitle: String? = null, val titleId: String? = null, val iconReady: Boolean = false,   // read from the PKG itself (see Pkg.kt)
     val fileName: String? = null,                  // name chosen in the app (sent to ezRemote when "send name" is on)
-    val speeds: List<Float> = emptyList()          // runtime only, not persisted
+    val speeds: List<Float> = emptyList(),         // runtime only, not persisted
+    /** ezRemote bg_download_history.json entry id when matched (0 = unknown). */
+    val bgId: Long = 0,
+    /** Last known failed_attempts from bg_download_history.json (-1 = not read yet). */
+    val bgFailedAttempts: Int = -1,
+    /** Last known official state from bg history (see BgHistory.STATE_*). -1 = unknown. */
+    val bgState: Int = -1
 ) {
     val pct: Int? get() = expectedSize?.takeIf { it > 0 }?.let { (currentSize * 100 / it).toInt().coerceIn(0, 100) }
     val frac: Float? get() = expectedSize?.takeIf { it > 0 }?.let { (currentSize.toDouble() / it).toFloat().coerceIn(0f, 1f) }

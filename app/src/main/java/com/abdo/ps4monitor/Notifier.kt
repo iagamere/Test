@@ -44,7 +44,6 @@ object Notifier {
         val detail = when (d.state) {
             DlState.DOWNLOADING -> listOfNotNull(d.pct?.let { "$it%" }, Fmt.mbs(d.speed), if (d.etaSec >= 0) "ETA ${Fmt.dur(d.etaSec)}" else null).joinToString(" • ")
             DlState.STALLED -> tr("Download stalled", "التحميل متعثّر")
-            DlState.PAUSED -> tr("Download paused", "التحميل متوقف مؤقتًا")
             DlState.CONNECTION_LOST -> tr("PS4 monitoring connection interrupted. Reconnecting…", "انقطع اتصال المراقبة. جارٍ إعادة الاتصال…")
             DlState.QUEUED, DlState.WAITING_FOR_START -> tr("Waiting for PS4 download to start…", "بانتظار أن يبدأ الـPS4 التحميل…")
             DlState.STARTING -> tr("Starting…", "جارٍ البدء…")
@@ -59,11 +58,16 @@ object Notifier {
         if (prev != null && prev.first == key) return
         if (prev != null && now - prev.second < 3000 && prev.first.substringAfter("${d.pkgTitle}|").substringBefore('|') == d.state.name) return
         last[d.notificationId] = key to now
+        val iconBmp = if (d.iconReady) PkgStore.bitmap("d:${d.id}", "icon0.png", 160) else null
+        val accent = notifColorFromBitmap(iconBmp)
         val b = NotificationCompat.Builder(ctx, "active").setSmallIcon(R.drawable.ic_stat_ps4)
-            .setContentTitle(d.pkgTitle ?: d.displayName).setSubText(psName(d).ifEmpty { null }).setContentText(text.lines().lastOrNull().orEmpty())
+            .setContentTitle(d.pkgTitle ?: d.displayName).setSubText(psName(d).ifEmpty { null })
+            .setContentText(text.lines().lastOrNull().orEmpty().ifEmpty { d.state.label })
             .setStyle(NotificationCompat.BigTextStyle().bigText(text.ifEmpty { d.state.label }))
+            .setColor(accent).setColorized(true)
             .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false).setContentIntent(pi())
-        if (d.iconReady) PkgStore.bitmap("d:${d.id}", "icon0.png", 128)?.let { b.setLargeIcon(it) }
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+        iconBmp?.let { b.setLargeIcon(it) }
         when {
             d.state == DlState.DOWNLOADING && d.pct != null -> b.setProgress(100, d.pct!!, false)
             d.state == DlState.DOWNLOADING || d.state == DlState.STARTING || d.state == DlState.QUEUED || d.state == DlState.WAITING_FOR_START -> b.setProgress(0, 0, true)
@@ -79,9 +83,19 @@ object Notifier {
             DlState.FAILED -> tr("Download failed", "فشل التحميل") to Tx.t(d.errorMessage ?: tr("Unknown reason", "سبب غير معروف"))
             else -> tr("Download has not started yet", "لم يبدأ التحميل بعد") to tr("ezRemote accepted the request but no download activity was detected.", "قبل ezRemote الطلب لكن لم يُكتشف أي نشاط تحميل.")
         }
-        val n = NotificationCompat.Builder(ctx, "results").setSmallIcon(if (d.state == DlState.COMPLETED) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_notify_error)
-            .setContentTitle(d.pkgTitle ?: d.displayName).setContentText("$title\n$body".lines().first()).setSubText(psName(d).ifEmpty { null })
-            .setStyle(NotificationCompat.BigTextStyle().bigText("$title\n$body")).setAutoCancel(true).setContentIntent(pi()).also { b -> if (d.iconReady) PkgStore.bitmap("d:${d.id}", "icon0.png", 128)?.let { b.setLargeIcon(it) } }.build()
+        val iconBmp = if (d.iconReady) PkgStore.bitmap("d:${d.id}", "icon0.png", 160) else null
+        val accent = notifColorFromBitmap(iconBmp)
+        val n = NotificationCompat.Builder(ctx, "results")
+            .setSmallIcon(if (d.state == DlState.COMPLETED) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_notify_error)
+            .setContentTitle(d.pkgTitle ?: d.displayName)
+            .setContentText("$title\n$body".lines().first())
+            .setSubText(psName(d).ifEmpty { null })
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$title\n$body"))
+            .setColor(accent).setColorized(d.state == DlState.COMPLETED)
+            .setAutoCancel(true).setContentIntent(pi())
+            .setCategory(if (d.state == DlState.COMPLETED) NotificationCompat.CATEGORY_STATUS else NotificationCompat.CATEGORY_ERROR)
+            .also { b -> iconBmp?.let { b.setLargeIcon(it) } }
+            .build()
         post(d.notificationId, n)            // same id as the ongoing one: replaces it, never adds a second
     }
 

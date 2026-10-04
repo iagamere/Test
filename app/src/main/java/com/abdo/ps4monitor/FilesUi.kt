@@ -22,6 +22,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -126,8 +128,17 @@ private fun saveToPhone(ctx: Context, p: Ps4, path: String) {
     val th by produceState<Thumb?>(null, ps4.id, dir, e.name, e.size, tick) {
         value = if (k == FKind.PKG || k == FKind.TMP) PkgThumbs.get(ps4, joinPath(dir, e.name), e.size, 120) else null     // loads by itself, queued
     }
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.3f
+    val seed = remember(th?.bmp) { seedFromBitmap(th?.bmp) }
+    val artTint = remember(seed, dark) { cardTintFromSeed(seed, dark) }
+    val container = when {
+        selected == true -> MaterialTheme.colorScheme.secondaryContainer
+        artTint != null -> artTint
+        else -> MaterialTheme.colorScheme.surfaceContainerLow
+    }
     Card(Modifier.fillMaxWidth().clip(shape).combinedClickable(onClick = onClick, onLongClick = onLong), shape = shape,
-        colors = CardDefaults.cardColors(containerColor = if (selected == true) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow)) {
+        colors = CardDefaults.cardColors(containerColor = container),
+        border = if (seed != null && selected != true) BorderStroke(1.dp, Color(seed).copy(alpha = 0.18f)) else null) {
         Row(Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
                 val b = th?.bmp

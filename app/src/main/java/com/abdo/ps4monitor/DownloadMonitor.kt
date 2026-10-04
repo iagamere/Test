@@ -66,6 +66,7 @@ object DownloadMonitor {
     private fun upStatus(id: String, f: (Ps4Status) -> Ps4Status) = status.update { m -> m + (id to f(m[id] ?: Ps4Status())) }
     fun isWatch(d: Download, now: Long = System.currentTimeMillis()) =
         (d.state.active && d.state != DlState.SUBMITTING) ||
+        (d.state == DlState.PAUSED && !d.superseded) ||   // keep polling history so a PS4-side resume is noticed
         (d.state == DlState.NOT_STARTED && !d.superseded && d.tempPath == null && now - d.submittedAt < NOT_STARTED_GRACE_MS)
     fun watched(ps4Id: String) = DownloadRepo.all.value.filter { it.ps4Id == ps4Id && isWatch(it) }
     fun anyWatched() = DownloadRepo.all.value.any { isWatch(it) }
@@ -148,7 +149,7 @@ object DownloadMonitor {
         val old = DownloadRepo.get(id) ?: return SubmitResult.Invalid("Download not found.")
         val p = Ps4Repo.get(old.ps4Id) ?: return SubmitResult.Invalid("That PS4 profile no longer exists.")
         if (old.sourceUrl.isBlank()) return SubmitResult.Invalid("This download was detected on the PS4, so there is no link to resend.")
-        if (old.state !in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED)) return SubmitResult.Invalid("Retry is only available for failed or not-started downloads.")
+        if (old.state !in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED, DlState.PAUSED)) return SubmitResult.Invalid("Retry is only available for failed, paused or not-started downloads.")
         val r = submit(p, old.sourceUrl, old.dest, 0L, old, old.fileName, old.fileName != null && Store.sp.getBoolean("sendpath", false))
         if (r is SubmitResult.Accepted) { DownloadRepo.update(id) { it.copy(superseded = true) }; d("Retry created attempt ${old.attempt + 1}") }
         return r
@@ -164,37 +165,85 @@ object DownloadMonitor {
             submittedAt = if (it.tempPath == null) System.currentTimeMillis() else it.submittedAt, completedAt = 0) }
         d("${x.displayName}: monitoring resumed by user"); ensureLoop(x.ps4Id); startSvc()
     }
-    // ---------------- pause / resume through the ezRemote history file ----------------
-    // Pause writes failed_attempts = (Settings: 5), resume writes (Settings: 1) into bg_download_history.json. Only that number changes.
-    suspend fun pauseTransfer(id: String): String = bgSet(id, true)
-    suspend fun resumeTransfer(id: String): String = bgSet(id, false)
-    private suspend fun bgSet(id: String, pause: Boolean): String = withContext(Dispatchers.IO) {
-        val dl = DownloadRepo.get(id) ?: return@withContext tr("Download not found.", "التحميل غير موجود.")
-        val p = Ps4Repo.get(dl.ps4Id) ?: return@withContext tr("That PS4 profile no longer exists.", "ملف هذا الـPS4 لم يعد موجودًا.")
-        val s = Store.settings()
-        BgHistory.refresh(p, s)
-        val e = BgHistory.match(dl) ?: return@withContext tr("This download was not found in the ezRemote history file.", "لم يُعثر على هذا التحميل في ملف سجل ezRemote.")
-        val v = if (pause) Store.sp.getInt("bgpause", 5) else Store.sp.getInt("bgresume", 1)
-        BgHistory.setFailed(p, e.id, v, s)?.let { return@withContext it }
-        d("${dl.displayName}: failed_attempts set to $v (${if (pause) "pause" else "resume"})")
-        if (pause) DownloadRepo.update(id) { it.copy(state = DlState.PAUSED, note = "Paused by you through the ezRemote history file.", speed = 0.0, etaSec = -1) }
-        else {
-            rts.remove(id)
-            if (!dl.state.active) resume(id)
-            else DownloadRepo.update(id) { it.copy(state = if (it.tempPath != null) DlState.STARTING else DlState.WAITING_FOR_START,
-                note = "Resume requested through the ezRemote history file.", errorMessage = null) }
-        }
-        ensureLoop(dl.ps4Id); startSvc(); kick(); syncNotifs()
-        if (pause) tr("failed_attempts = $v was written and verified. If the PS4 keeps downloading, ezRemote has not re-read the file yet.",
-                      "كُتبت القيمة failed_attempts = $v وتم التحقق منها. إن استمر الـPS4 في التحميل فهذا يعني أن ezRemote لم يعد قراءة الملف بعد.")
-        else tr("failed_attempts = $v was written and verified. Waiting for the download to grow…", "كُتبت القيمة failed_attempts = $v وتم التحقق منها. بانتظار نمو التحميل…")
-    }
-
     fun stop(id: String) {
         val x = DownloadRepo.get(id) ?: return
         DownloadRepo.update(id) { it.copy(state = DlState.STOPPED, note = "Monitoring stopped by you. The PS4 download itself is not cancelled.", speed = 0.0, etaSec = -1) }
         d("${x.displayName}: monitoring stopped by user"); syncNotifs()
     }
+
+    /**
+     * Real pause: write failed_attempts = 5 into bg_download_history.json so ezRemote Server
+     * stops retrying the download. Falls back to monitoring-only stop if the history file
+     * cannot be reached or no matching entry is found.
+     */
+    suspend fun pausePs4(id: String): String {
+        val x = DownloadRepo.get(id) ?: return tr("Download not found.", "التحميل غير موجود.")
+        val p = Ps4Repo.get(x.ps4Id) ?: return tr("That PS4 profile no longer exists.", "ملف هذا الـPS4 لم يعد موجودًا.")
+        return try {
+            val ok = withContext(Dispatchers.IO) { BgHistory.pause(p, x) }
+            if (ok) {
+                DownloadRepo.update(id) {
+                    it.copy(
+                        state = DlState.PAUSED,
+                        note = "Paused on the PS4 (failed_attempts set to ${BgHistory.PAUSE_ATTEMPTS}).",
+                        speed = 0.0, etaSec = -1,
+                        bgFailedAttempts = BgHistory.PAUSE_ATTEMPTS,
+                        bgState = BgHistory.STATE_FAILED
+                    )
+                }
+                d("${x.displayName}: paused via bg_download_history.json")
+                ev("${x.displayName}: paused on PS4")
+                syncNotifs()
+                tr("Paused on the PS4.", "تم الإيقاف المؤقت على الـPS4.")
+            } else {
+                stop(id)
+                tr("No matching entry in bg_download_history.json — monitoring stopped only.",
+                    "لا يوجد سجل مطابق في bg_download_history.json — أُوقفت المراقبة فقط.")
+            }
+        } catch (e: Exception) {
+            d("pausePs4 failed: ${e.javaClass.simpleName}: ${e.message}")
+            stop(id)
+            tr("Could not write history file (${EzRemote.friendly(e)}). Monitoring stopped only.",
+                "تعذّر تعديل ملف السجل (${EzRemote.friendly(e)}). أُوقفت المراقبة فقط.")
+        }
+    }
+
+    /**
+     * Resume a download that was paused via bg_download_history.json by setting
+     * failed_attempts back to 0. Also re-attaches monitoring.
+     */
+    suspend fun resumePs4(id: String): String {
+        val x = DownloadRepo.get(id) ?: return tr("Download not found.", "التحميل غير موجود.")
+        val p = Ps4Repo.get(x.ps4Id) ?: return tr("That PS4 profile no longer exists.", "ملف هذا الـPS4 لم يعد موجودًا.")
+        if (x.superseded) return tr("This download was superseded by a retry.", "هذا التحميل استُبدل بإعادة محاولة.")
+        return try {
+            val ok = withContext(Dispatchers.IO) { BgHistory.resume(p, x) }
+            rts.remove(id)
+            DownloadRepo.update(id) {
+                it.copy(
+                    state = if (it.tempPath != null) DlState.STARTING else DlState.WAITING_FOR_START,
+                    note = if (ok) "Resumed on the PS4 (failed_attempts reset). Monitoring re-attached."
+                           else "History entry not found; monitoring re-attached only.",
+                    errorMessage = null, terminalNotified = false, completedAt = 0,
+                    bgFailedAttempts = if (ok) BgHistory.RESUME_ATTEMPTS else it.bgFailedAttempts,
+                    submittedAt = if (it.tempPath == null) System.currentTimeMillis() else it.submittedAt
+                )
+            }
+            d("${x.displayName}: resumePs4 ok=$ok")
+            if (ok) ev("${x.displayName}: resumed on PS4")
+            ensureLoop(x.ps4Id); startSvc(); syncNotifs()
+            if (ok) tr("Resumed on the PS4.", "تم الاستئناف على الـPS4.")
+            else tr("No matching history entry — monitoring resumed only.",
+                "لا يوجد سجل مطابق — استُؤنفت المراقبة فقط.")
+        } catch (e: Exception) {
+            d("resumePs4 failed: ${e.javaClass.simpleName}: ${e.message}")
+            // Still re-attach monitoring so the user is not stuck
+            resume(id)
+            tr("Could not write history file (${EzRemote.friendly(e)}). Monitoring resumed only.",
+                "تعذّر تعديل ملف السجل (${EzRemote.friendly(e)}). استُؤنفت المراقبة فقط.")
+        }
+    }
+
     fun remove(id: String) { Notifier.cancel(DownloadRepo.get(id)?.notificationId ?: return); rts.remove(id); pps.remove(id); PkgStore.delete("d:$id"); DownloadRepo.remove(id) }
     fun setExpected(id: String, bytes: Long) {
         DownloadRepo.update(id) { it.copy(expectedSize = bytes, expectedSource = "entered by you") }; d("Expected size entered by user: ${Fmt.bytes(bytes)}")
@@ -287,12 +336,67 @@ object DownloadMonitor {
             if (failed) { onFailure(p, st, s); wait = maxOf(wait, minOf(s.interval * 1000L shl minOf(st.failStreak, 4), 30_000L)) }
             else {
                 onSuccess(p, st)
-                runCatching { BgHistory.refresh(p, s) }          // exact size / failed_attempts from ezRemote's own file (never affects the failure counters)
                 try { process(p, listings, s) } catch (e: CancellationException) { throw e } catch (e: Exception) { d("Process error: ${e.javaClass.simpleName}: ${e.message}") }
+                try { enrichFromBgHistory(p) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    d("BgHistory enrich: ${e.javaClass.simpleName}: ${e.message}")
+                }
             }
             if (watched(ps4Id).all { it.state == DlState.NOT_STARTED }) wait = maxOf(wait, 10_000L)
+            // Also watch PAUSED downloads lightly so we notice a manual resume on the PS4 side
+            if (DownloadRepo.all.value.any { it.ps4Id == ps4Id && it.state == DlState.PAUSED }) wait = maxOf(wait, 8_000L)
             syncNotifs()
             withTimeoutOrNull(wait) { wake.first() }          // a network callback can wake us early
+        }
+    }
+
+    /**
+     * Read bg_download_history.json and:
+     *  - fill accurate file_size / bytes_transfered into matching Download records
+     *  - auto-detect when the server has stopped retrying (failed_attempts >= threshold) → PAUSED
+     *  - if a previously PAUSED entry now has low failed_attempts again → re-activate monitoring
+     */
+    private fun enrichFromBgHistory(p: Ps4) {
+        val entries = try { BgHistory.read(p, 8_000) } catch (_: Exception) { return }
+        if (entries.isEmpty()) return
+        val ours = DownloadRepo.all.value.filter { it.ps4Id == p.id && !it.superseded }
+        for (e in entries) {
+            val match = ours.firstOrNull { BgHistory.match(e, it) } ?: continue
+            val sizeFromBg = e.bytesTransferred.takeIf { it > 0 }
+            val expectedFromBg = e.fileSize.takeIf { it > 0 }
+            val wasPaused = match.state == DlState.PAUSED
+            val nowPaused = e.isPaused && !e.isSuccess
+            val nowSuccess = e.isSuccess
+
+            DownloadRepo.update(match.id) { d ->
+                var y = d.copy(
+                    bgId = e.id,
+                    bgFailedAttempts = e.failedAttempts,
+                    bgState = e.state,
+                    lastSeenAt = System.currentTimeMillis()
+                )
+                // Prefer the authoritative size from the history ledger when available
+                if (sizeFromBg != null && sizeFromBg >= y.currentSize) y = y.copy(currentSize = sizeFromBg)
+                if (expectedFromBg != null && (y.expectedSize == null || y.expectedSource.isBlank() ||
+                            y.expectedSource.startsWith("server") || y.expectedSource.startsWith("bg")))
+                    y = y.copy(expectedSize = expectedFromBg, expectedSource = "bg_download_history.json")
+                when {
+                    nowSuccess && y.state.active -> y // let the normal filesystem path mark COMPLETED
+                    nowPaused && y.state.active -> {
+                        d("${y.displayName}: bg history reports failed_attempts=${e.failedAttempts} → PAUSED")
+                        ev("${y.displayName}: paused on PS4 (failed_attempts=${e.failedAttempts})")
+                        y.copy(state = DlState.PAUSED, note = "Paused on the PS4 (failed_attempts=${e.failedAttempts}).", speed = 0.0, etaSec = -1)
+                    }
+                    wasPaused && !nowPaused && e.isActive -> {
+                        d("${y.displayName}: bg history shows activity again → resuming monitoring")
+                        y.copy(
+                            state = if (y.tempPath != null) DlState.STARTING else DlState.WAITING_FOR_START,
+                            note = "PS4 download resumed (detected via bg history).",
+                            errorMessage = null, terminalNotified = false
+                        )
+                    }
+                    else -> y
+                }
+            }
         }
     }
 
@@ -392,21 +496,8 @@ object DownloadMonitor {
         untracked.update { m -> m + (p.id to (m[p.id].orEmpty().filter { it.first != dir } + left.map { dir to it })) }
     }
 
-    /** Exact total size from ezRemote's own history file (unless the user typed a size). Returns the up-to-date record. */
-    private fun applyBg(d0: Download): Download {
-        val bg = BgHistory.match(d0) ?: return d0
-        if (bg.fileSize > 0 && !d0.expectedSource.startsWith("entered") && d0.expectedSize != bg.fileSize) {
-            DownloadRepo.update(d0.id) { it.copy(expectedSize = bg.fileSize, expectedSource = "ezRemote history file (size confirmed)") }
-            d("${d0.displayName}: exact size from the ezRemote history file: ${Fmt.bytes(bg.fileSize)}")
-            return DownloadRepo.get(d0.id) ?: d0
-        }
-        return d0
-    }
-
     private fun step(p: Ps4, d0: Download, entries: List<FsEntry>, s: Settings, now: Long) {
         val rt = rts.getOrPut(d0.id) { Rt(d0) }
-        val dl = applyBg(d0)
-        val bg = BgHistory.match(dl)
         val dir = norm(d0.dest)
         val byName = entries.associateBy { it.name }
 
@@ -467,8 +558,8 @@ object DownloadMonitor {
         if (cur > rt.peak) rt.peak = cur
         rt.speeds = (rt.speeds + cur.toFloat()).takeLast(maxOf(30, 300 / s.interval))
         rt.lastSize = size
-        val exp = dl.expectedSize?.takeIf { it > 0 }
-        val margin = if (dl.expectedSource.contains("confirmed") || dl.expectedSource.contains("agrees")) (1L shl 16) else maxOf(1L shl 20, (exp ?: 0L) / 1000)
+        val exp = d0.expectedSize?.takeIf { it > 0 }
+        val margin = if (d0.expectedSource.contains("confirmed") || d0.expectedSource.contains("agrees")) (1L shl 16) else maxOf(1L shl 20, (exp ?: 0L) / 1000)
         val eta = if (exp != null && size < exp && avg > 1.0) ((exp - size) / avg).toLong() else -1L      // never a fake ETA
         val atExp = exp != null && size >= exp - margin
 
@@ -476,7 +567,6 @@ object DownloadMonitor {
         val stalledMs = now - rt.lastGrow
         if (atExp) { st = DlState.VERIFYING; note = "Expected size reached — waiting for the PS4 to finish the file…"
             if (rt.unchanged >= 3 && rt.expStableSince == 0L) rt.expStableSince = now }
-        else if (bg != null && bg.failed >= BgHistory.detect() && cur <= 0.0) { st = DlState.PAUSED; note = "ezRemote stopped this download (failed_attempts reached the limit). Press Resume." }
         else if (rt.unchanged >= 3 && stalledMs >= s.stuck * 1000L) { st = DlState.STALLED; note = "No download progress detected for ${stalledMs / 1000} s." }
         else if (rt.grew) { st = DlState.DOWNLOADING; note = "" }
         else { st = DlState.STARTING; note = "File detected; waiting for data…" }
@@ -621,7 +711,7 @@ object DownloadMonitor {
         for (x in all) {
             when {
                 x.state.active && x.state != DlState.SUBMITTING -> Notifier.progress(x)
-                x.state == DlState.STOPPED -> Notifier.cancel(x.notificationId)
+                x.state == DlState.STOPPED || x.state == DlState.PAUSED -> Notifier.cancel(x.notificationId)
                 !x.terminalNotified && (x.state == DlState.COMPLETED || x.state == DlState.FAILED || x.state == DlState.NOT_STARTED) -> {
                     DownloadRepo.update(x.id) { it.copy(terminalNotified = true) }       // persist BEFORE posting: never twice
                     Notifier.result(x)

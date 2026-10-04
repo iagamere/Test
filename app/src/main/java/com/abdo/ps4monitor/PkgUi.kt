@@ -14,6 +14,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -73,6 +76,9 @@ private fun report(i: PkgInfo, path: String, size: Long): String = buildString {
     var confirmInstall by remember { mutableStateOf(false) }
     val state by produceState<PkgState>(PkgState.Loading, ps4Id, path, reload) { value = PkgState.Loading; value = loadPkg(ps4, path, reload > 0) }
     val fileName = path.substringAfterLast('/')
+    // Dynamic colours extracted from the game artwork (prefer pic0 / icon, then pic1).
+    val artBmp = (state as? PkgState.Ok)?.let { it.pic0 ?: it.icon ?: it.pic1 }
+    ArtTheme(artBmp) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             BackHeader(fileName, nav) {
@@ -90,21 +96,45 @@ private fun report(i: PkgInfo, path: String, size: Long): String = buildString {
             is PkgState.Ok -> {
                 val i = st.info
                 item {
-                    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    val cs = MaterialTheme.colorScheme
+                    Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge,
+                        colors = CardDefaults.cardColors(containerColor = cs.primaryContainer, contentColor = cs.onPrimaryContainer)) {
                         Column {
-                            st.pic1?.let { b -> Image(b.asImageBitmap(), null, Modifier.fillMaxWidth().height(150.dp).clickable { preview = b }, contentScale = ContentScale.Crop) }
-                            Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(92.dp).clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
-                                    val ic = st.icon
-                                    if (ic != null) Image(ic.asImageBitmap(), null, Modifier.fillMaxSize().clickable { preview = ic }, contentScale = ContentScale.Crop) else Ico(R.drawable.ic_package, 40.dp)
-                                }
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(i.title ?: fileName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                    Text(i.titleId ?: i.contentId, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                            // Cinematic banner: pic1 (or pic0) with gradient fade into primaryContainer
+                            val banner = st.pic1 ?: st.pic0
+                            if (banner != null) {
+                                Box(Modifier.fillMaxWidth().height(180.dp).clickable { preview = banner }) {
+                                    Image(banner.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                    Box(Modifier.fillMaxSize().background(
+                                        Brush.verticalGradient(listOf(Color.Transparent, cs.primaryContainer.copy(alpha = 0.55f), cs.primaryContainer))
+                                    ))
                                 }
                             }
-                            FlowRow(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                listOfNotNull(PkgFormat.categoryLabel(i.category), i.region, i.appVer?.let { "v$it" }, i.systemVer?.let { "FW ${it.substringBefore(' ')}+" }).forEach { AssistChip(onClick = {}, label = { Lbl(it) }) }
+                            Row(Modifier.padding(horizontal = 16.dp).padding(top = if (banner != null) 0.dp else 16.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(96.dp).clip(RoundedCornerShape(22.dp))
+                                    .background(cs.surfaceContainerHigh)
+                                    .border(2.dp, cs.primary.copy(alpha = 0.35f), RoundedCornerShape(22.dp)),
+                                    contentAlignment = Alignment.Center) {
+                                    val ic = st.icon
+                                    if (ic != null) Image(ic.asImageBitmap(), null, Modifier.fillMaxSize().clickable { preview = ic }, contentScale = ContentScale.Crop)
+                                    else Ico(R.drawable.ic_package, 40.dp, cs.primary)
+                                }
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(i.title ?: fileName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
+                                        maxLines = 3, overflow = TextOverflow.Ellipsis, color = cs.onPrimaryContainer)
+                                    Text(i.titleId ?: i.contentId, style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1, color = cs.onPrimaryContainer.copy(alpha = 0.75f))
+                                }
+                            }
+                            FlowRow(Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 14.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                listOfNotNull(PkgFormat.categoryLabel(i.category), i.region, i.appVer?.let { "v$it" }, i.systemVer?.let { "FW ${it.substringBefore(' ')}+" })
+                                    .forEach {
+                                        AssistChip(onClick = {}, label = { Lbl(it) },
+                                            colors = AssistChipDefaults.assistChipColors(
+                                                containerColor = cs.secondaryContainer, labelColor = cs.onSecondaryContainer))
+                                    }
                             }
                         }
                     }
@@ -158,6 +188,7 @@ private fun report(i: PkgInfo, path: String, size: Long): String = buildString {
             }
         }
     }
+    } // ArtTheme
     if (confirmInstall && ps4 != null) ConfirmInstall(ps4, listOf(path), close = { confirmInstall = false })
     preview?.let { b -> Dialog(onDismissRequest = { preview = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Image(b.asImageBitmap(), null, Modifier.fillMaxWidth().clickable { preview = null }, contentScale = ContentScale.Fit) } }
