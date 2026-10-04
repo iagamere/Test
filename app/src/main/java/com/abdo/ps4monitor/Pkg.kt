@@ -3,7 +3,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -132,6 +135,11 @@ object PkgStore {
         mem.snapshot().keys.filter { it.startsWith("$key/") }.forEach { mem.remove(it) }
     }
     fun load(key: String): PkgInfo? = runCatching { File(dir(key), "info.json").takeIf { it.exists() }?.let { fromJson(JSONObject(it.readText())) } }.getOrNull()
+    fun copy(fromKey: String, toKey: String) {
+        val src = dir(fromKey); if (!src.exists()) return
+        val dst = dir(toKey, true); src.listFiles()?.forEach { it.copyTo(File(dst, it.name), overwrite = true) }
+        mem.snapshot().keys.filter { it.startsWith("$toKey/") }.forEach { mem.remove(it) }
+    }
     fun delete(key: String) { dir(key).deleteRecursively(); mem.snapshot().keys.filter { it.startsWith("$key/") }.forEach { mem.remove(it) } }
     fun bytes(key: String, name: String): ByteArray? = File(dir(key), name).takeIf { it.exists() }?.readBytes()
 
@@ -176,6 +184,25 @@ object PkgInspector {
     class Result(val info: PkgInfo?, val error: String?, val notPkg: Boolean)
 
     fun ftpOn(p: Ps4) = p.mode != MonitorMode.HTTP_ONLY && p.ftpPort > 0
+    fun httpOn(p: Ps4) = p.mode != MonitorMode.FTP_ONLY
+    fun canRead(p: Ps4) = httpOn(p) || ftpOn(p)
+    private val httpBadUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Partial file read: ezRemote web (Range) first, FTP (REST) as fallback. Never transfers more than [len] bytes. */
+    fun readBytes(p: Ps4, path: String, off: Long, len: Int): ByteArray {
+        val s = Store.settings(); var last: Exception? = null
+        if (httpOn(p) && (httpBadUntil[p.id] ?: 0L) < System.currentTimeMillis()) {
+            try { return EzRemote.readRange(p, path, off, len, s.timeout * 1000) }
+            catch (e: Exception) { last = e; if (ftpOn(p)) httpBadUntil[p.id] = System.currentTimeMillis() + 60_000; DownloadMonitor.d("File read via web failed: ${e.javaClass.simpleName}: ${e.message}") }
+        }
+        if (ftpOn(p)) {
+            try { return Ftp.readRange(conn(p), s, path, off, len) }
+            catch (e: Exception) { last = e; DownloadMonitor.d("File read via FTP failed: ${e.javaClass.simpleName}: ${e.message}") }
+        }
+        throw last ?: IOException("No connection method is enabled for this PS4")
+    }
+    /** True when the file starts with the PS4 PKG magic. */
+    fun isPkg(p: Ps4, path: String): Boolean { val b = readBytes(p, path, 0, 4); return b.size == 4 && PkgFormat.u32(b, 0) == PkgFormat.MAGIC }
     private fun conn(p: Ps4) = Conn(p.host, p.ftpPort, p.ftpUser, p.ftpPass)
     private val PNG = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
     private fun isPng(b: ByteArray) = b.size > 8 && (0 until 4).all { b[it] == PNG[it] }
@@ -188,26 +215,27 @@ object PkgInspector {
         if (p.mode != MonitorMode.FTP_ONLY) try { return EzRemote.list(p, d, s.timeout * 1000) } catch (e: Exception) { last = e; DownloadMonitor.d("Browse HTTP failed: ${e.javaClass.simpleName}: ${e.message}") }
         throw last ?: IOException("No connection method is enabled for this PS4")
     }
-    fun friendly(e: Exception) = when (e) { is PkgError -> e.message ?: "PKG error"; is SoftError, is FtpError -> e.message ?: "FTP error"; is IOException -> if (e.message?.startsWith("RETR") == true) "The PS4 would not let the file be read." else Ftp.friendly(e); else -> Ftp.friendly(e) }
+    fun friendly(e: Exception) = when (e) { is PkgError -> e.message ?: "PKG error"; is EzError -> EzRemote.friendly(e); is SoftError, is FtpError -> e.message ?: "FTP error"; is IOException -> if (e.message?.startsWith("RETR") == true) "The PS4 would not let the file be read." else Ftp.friendly(e); else -> Ftp.friendly(e) }
 
     fun sizeOf(p: Ps4, path: String): Long? {
+        if (httpOn(p)) try { val n = EzRemote.fileSize(p, path, Store.settings().timeout * 1000); if (n > 0) return n } catch (e: Exception) { }      // cheap single-file query
         val dir = path.substringBeforeLast('/', "/").ifEmpty { "/" }; val name = path.substringAfterLast('/')
         return browse(p, dir).firstOrNull { it.name == name }?.size
     }
 
     fun inspect(p: Ps4, path: String, fileSizeIn: Long?, key: String, full: Boolean): Result {
-        if (!ftpOn(p)) return Result(null, "Reading inside a PKG needs FTP. Enable the FTP port for this PS4.", false)
+        if (!canRead(p)) return Result(null, "No web or FTP connection is enabled for this PS4.", false)
         val s = Store.settings(); val c = conn(p)
         try {
             val fsz = fileSizeIn ?: sizeOf(p, path) ?: throw PkgError("Could not read the file size")
             if (fsz < 4) throw PkgError("The file is empty so far")
-            val head = Ftp.readRange(c, s, path, 0, minOf(fsz, 0x3000L).toInt())
+            val head = readBytes(p, path, 0, minOf(fsz, 0x3000L).toInt())
             val h = PkgFormat.parseHeader(head)
             val missing = ArrayList<String>()
             fun read(off: Long, len: Long, cap: Long): ByteArray? {
                 if (len <= 0 || len > cap || off < 0) return null
                 if (off + len > fsz) return null
-                return Ftp.readRange(c, s, path, off, len.toInt())
+                return readBytes(p, path, off, len.toInt())
             }
             if (h.entryCount !in 1..4096) throw PkgError("Entry count looks wrong (${h.entryCount}); this may not be a standard PS4 PKG")
             val tblLen = h.entryCount * 32L
@@ -251,5 +279,44 @@ object PkgInspector {
             DownloadMonitor.d("PKG read failed: ${e.javaClass.simpleName}: ${e.message}")
             return Result(null, friendly(e), false)
         }
+    }
+}
+
+class Thumb(val bmp: Bitmap, val title: String?, val titleId: String?)
+
+/**
+ * Automatic artwork for any PKG shown anywhere in the app (Files, Downloads, Home, notifications).
+ * Cached on disk; a miss triggers ONE queued header read (never parallel: the PS4 is small). Failures are remembered for a while
+ * so scrolling does not hammer the PS4. A partial .tmp is keyed without its size, so its artwork is read once, not on every refresh.
+ */
+object PkgThumbs {
+    private val miss = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    fun thumbKey(p: Ps4, path: String, size: Long): String =
+        if (path.endsWith(".tmp", true)) PkgStore.key(p.id, "thumb|$path", 0) else PkgStore.key(p.id, "thumb|$path", size)
+
+    suspend fun get(p: Ps4, path: String, size: Long, maxDim: Int = 160): Thumb? = withContext(Dispatchers.IO) {
+        val key = thumbKey(p, path, size)
+        fun hit(): Thumb? = PkgStore.bitmap(key, "icon0.png", maxDim)?.let { b -> val i = PkgStore.load(key); Thumb(b, i?.title, i?.titleId) }
+        hit()?.let { return@withContext it }
+        if (!PkgInspector.canRead(p) || size < PkgFormat.HEADER_MIN) return@withContext null
+        if ((miss[key] ?: 0L) > System.currentTimeMillis()) return@withContext null
+        PkgInspector.mutex.withLock {
+            hit() ?: run {
+                val r = PkgInspector.inspect(p, path, size, key, false)
+                hit() ?: run { miss[key] = System.currentTimeMillis() + (if (r.notPkg) 1_800_000L else if (r.info != null) 25_000L else 90_000L); null }
+            }
+        }
+    }
+
+    /** Artwork of a download record: its own cache first, then the file on the PS4 (final file, else the .tmp). Adopts the result into the record. */
+    suspend fun forDownload(d: Download, maxDim: Int): Bitmap? = withContext(Dispatchers.IO) {
+        PkgStore.bitmap("d:${d.id}", "icon0.png", maxDim)?.let { return@withContext it }
+        if (d.state == DlState.SUBMITTING || d.state == DlState.QUEUED || d.state == DlState.WAITING_FOR_START) return@withContext null
+        val p = Ps4Repo.get(d.ps4Id) ?: return@withContext null
+        val path = d.finalPath ?: d.tempPath ?: return@withContext null
+        val t = get(p, path, d.currentSize, maxDim) ?: return@withContext null
+        PkgStore.copy(thumbKey(p, path, d.currentSize), "d:${d.id}")
+        DownloadRepo.update(d.id) { it.copy(iconReady = true, pkgTitle = it.pkgTitle ?: t.title, titleId = it.titleId ?: t.titleId) }
+        t.bmp
     }
 }

@@ -48,6 +48,10 @@ object Tx {
         "Reached the expected size and stayed stable (the PS4 kept the temporary file name)." to "بلغ الحجم المتوقع وبقي ثابتًا (أبقى الـPS4 اسم الملف المؤقت).",
         "PKG header (agrees with PFS image end)" to "ترويسة PKG (تطابق نهاية صورة PFS)", "PKG header" to "ترويسة PKG", "PKG header (unconfirmed)" to "ترويسة PKG (غير مؤكد)",
         "entered by you" to "أدخلته أنت",
+        "ezRemote history file (size confirmed)" to "ملف سجل ezRemote (الحجم مؤكد)",
+        "ezRemote stopped this download (failed_attempts reached the limit). Press Resume." to "أوقف ezRemote هذا التحميل (بلغ failed_attempts الحد). اضغط استئناف.",
+        "Paused by you through the ezRemote history file." to "أوقفته أنت عبر ملف سجل ezRemote.",
+        "Resume requested through the ezRemote history file." to "طُلب الاستئناف عبر ملف سجل ezRemote.",
         "known" to "معروف",
         // connection / probe
         "The PS4 did not answer in time." to "لم يستجب الـPS4 في الوقت المناسب.",

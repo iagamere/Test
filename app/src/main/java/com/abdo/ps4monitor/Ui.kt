@@ -67,7 +67,7 @@ fun stateIcon(s: DlState) = when (s) {
     DlState.COMPLETED -> R.drawable.ic_check_circle
     DlState.FAILED, DlState.CONNECTION_LOST -> R.drawable.ic_error
     DlState.NOT_STARTED, DlState.STALLED -> R.drawable.ic_warning
-    DlState.STOPPED -> R.drawable.ic_stop
+    DlState.STOPPED, DlState.PAUSED -> R.drawable.ic_stop
     DlState.VERIFYING -> R.drawable.ic_search
     DlState.DOWNLOADING -> R.drawable.ic_download
     else -> R.drawable.ic_schedule
@@ -75,7 +75,7 @@ fun stateIcon(s: DlState) = when (s) {
 @Composable fun stateColors(s: DlState): Pair<Color, Color> { val c = MaterialTheme.colorScheme; return when (s) {
     DlState.COMPLETED -> c.tertiaryContainer to c.onTertiaryContainer
     DlState.FAILED, DlState.NOT_STARTED -> c.errorContainer to c.onErrorContainer
-    DlState.STALLED, DlState.CONNECTION_LOST -> c.secondaryContainer to c.onSecondaryContainer
+    DlState.STALLED, DlState.CONNECTION_LOST, DlState.PAUSED -> c.secondaryContainer to c.onSecondaryContainer
     DlState.STOPPED -> c.surfaceContainerHighest to c.onSurfaceVariant
     else -> c.primaryContainer to c.onPrimaryContainer } }
 
@@ -97,7 +97,7 @@ fun resultText(r: SubmitResult) = Tx.t(when (r) {
     val container = if (selected == true) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow
     Card(Modifier.fillMaxWidth().clip(shape).combinedClickable(onClick = onOpen, onLongClick = onLong), shape = shape, colors = CardDefaults.cardColors(containerColor = container)) {
         Row(Modifier.padding(start = 14.dp, top = 14.dp, bottom = 14.dp, end = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            val art by produceState<Bitmap?>(null, d.id, d.iconReady) { value = if (d.iconReady) withContext(Dispatchers.IO) { PkgStore.bitmap("d:${d.id}", "icon0.png", 160) } else null }
+            val art by produceState<Bitmap?>(null, d.id, d.iconReady, d.tempPath, d.finalPath) { value = PkgThumbs.forDownload(d, 160) }
             val pic = art
             Box(Modifier.size(56.dp)) {
                 if (pic != null) Image(pic.asImageBitmap(), null, Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)), contentScale = ContentScale.Crop)
@@ -195,7 +195,8 @@ fun resultText(r: SubmitResult) = Tx.t(when (r) {
     var sizeTxt by remember { mutableStateOf("") }
     var name by remember { mutableStateOf(initialUrl.takeIf { it.startsWith("http") }?.let { Names.fromUrl(it) }.orEmpty()) }
     var nameEdited by remember { mutableStateOf(false) }
-    var sendName by remember { mutableStateOf(Store.sp.getBoolean("sendpath", true)) }
+    var sendName by remember { mutableStateOf(Store.sp.getBoolean("sendpath", false)) }
+    var installMode by remember { mutableStateOf(false) }
     val firstLink = Regex("""https?://\S+""").find(url)?.value
     val linkCount = Regex("""https?://\S+""").findAll(url).count()
     LaunchedEffect(firstLink) { if (!nameEdited) name = firstLink?.let { Names.fromUrl(it) }.orEmpty() }
@@ -219,6 +220,10 @@ fun resultText(r: SubmitResult) = Tx.t(when (r) {
                     Switch(sendName, { sendName = it; Store.sp.edit().putBoolean("sendpath", it).apply() })
                 }
                 OutlinedTextField(sizeTxt, { sizeTxt = it }, label = { Text(tr("File size (optional), e.g. 47.5 GB", "حجم الملف (اختياري) مثل 47.5 GB")) }, singleLine = true)
+                if (linkCount <= 1) Row(Modifier.fillMaxWidth().clickable { installMode = !installMode }, verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(installMode, { installMode = it })
+                    Column(Modifier.weight(1f)) { Text(tr("Install directly (stream, nothing saved)", "تثبيت مباشر (بث، بدون حفظ ملف)")); Dim(tr("For .pkg links only. ezRemote installs while downloading; this app cannot track the install.", "لروابط .pkg فقط. يثبّت ezRemote أثناء التحميل؛ لا يستطيع التطبيق تتبّع التثبيت.")) }
+                }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (msg.isNotEmpty()) Text(msg, fontWeight = FontWeight.SemiBold)
                 Dim(tr("The PS4 downloads the file itself through ezRemote. This app only sends the request and then watches the PS4. Without a size, no percentage or ETA is shown.",
@@ -227,6 +232,8 @@ fun resultText(r: SubmitResult) = Tx.t(when (r) {
         } },
         confirmButton = { TextButton(enabled = !busy && p != null && Regex("""https?://""").containsMatchIn(url), onClick = {
             val target = p ?: return@TextButton
+            val one = firstLink
+            if (installMode && linkCount == 1 && one != null) { Ops.launch(tr("Installing from link…", "التثبيت من الرابط…")) { Ops.installUrl(target, one) }; close(); return@TextButton }
             busy = true; msg = ""
             scope.launch {
                 val links = Regex("""https?://\S+""").findAll(url).map { it.value }.toList().distinct().take(10)

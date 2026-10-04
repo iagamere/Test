@@ -70,6 +70,7 @@ private fun report(i: PkgInfo, path: String, size: Long): String = buildString {
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var query by remember { mutableStateOf("") }
     var showAll by remember { mutableStateOf(false) }
+    var confirmInstall by remember { mutableStateOf(false) }
     val state by produceState<PkgState>(PkgState.Loading, ps4Id, path, reload) { value = PkgState.Loading; value = loadPkg(ps4, path, reload > 0) }
     val fileName = path.substringAfterLast('/')
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -108,6 +109,8 @@ private fun report(i: PkgInfo, path: String, size: Long): String = buildString {
                         }
                     }
                 }
+                if (path.lowercase().endsWith(".pkg") && i.totalSize != null && st.size >= i.totalSize && ps4 != null && PkgInspector.httpOn(ps4))
+                    item { Button(onClick = { confirmInstall = true }, Modifier.fillMaxWidth()) { Ico(R.drawable.ic_install, 20.dp); Spacer(Modifier.width(8.dp)); Lbl(tr("Install on the PS4", "تثبيت على الـPS4")) } }
                 if (i.missing.isNotEmpty()) item { Panel {
                     Text(tr("Some parts are not available yet", "بعض الأجزاء غير متاحة بعد"), fontWeight = FontWeight.SemiBold)
                     Dim(tr("The file may still be downloading, so these parts have not been written yet: ", "قد يكون الملف قيد التحميل لذا لم تُكتب هذه الأجزاء بعد: ") + i.missing.joinToString())
@@ -155,6 +158,7 @@ private fun report(i: PkgInfo, path: String, size: Long): String = buildString {
             }
         }
     }
+    if (confirmInstall && ps4 != null) ConfirmInstall(ps4, listOf(path), close = { confirmInstall = false })
     preview?.let { b -> Dialog(onDismissRequest = { preview = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Image(b.asImageBitmap(), null, Modifier.fillMaxWidth().clickable { preview = null }, contentScale = ContentScale.Fit) } }
 }

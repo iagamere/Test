@@ -57,11 +57,11 @@ object DownloadMonitor {
         }
     }
     fun clearLog() { log.value = emptyList() }
-    private fun ev(m: String) = events.update { (it + "${Fmt.time(System.currentTimeMillis())}  $m").takeLast(40) }
+    fun ev(m: String) = events.update { (it + "${Fmt.time(System.currentTimeMillis())}  $m").takeLast(40) }
 
     fun init(c: Context) { app = c.applicationContext }
     fun kick() { wake.tryEmit(Unit) }
-    private fun startSvc() { runCatching { ContextCompat.startForegroundService(app, Intent(app, MonitorService::class.java)) } }
+    fun startSvc() { runCatching { ContextCompat.startForegroundService(app, Intent(app, MonitorService::class.java)) } }
     fun norm(p: String): String { val t = p.trim().trimEnd('/'); return if (t.isEmpty()) "/" else if (t.startsWith("/")) t else "/$t" }
     private fun upStatus(id: String, f: (Ps4Status) -> Ps4Status) = status.update { m -> m + (id to f(m[id] ?: Ps4Status())) }
     fun isWatch(d: Download, now: Long = System.currentTimeMillis()) =
@@ -149,7 +149,7 @@ object DownloadMonitor {
         val p = Ps4Repo.get(old.ps4Id) ?: return SubmitResult.Invalid("That PS4 profile no longer exists.")
         if (old.sourceUrl.isBlank()) return SubmitResult.Invalid("This download was detected on the PS4, so there is no link to resend.")
         if (old.state !in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED)) return SubmitResult.Invalid("Retry is only available for failed or not-started downloads.")
-        val r = submit(p, old.sourceUrl, old.dest, 0L, old, old.fileName, old.fileName != null && Store.sp.getBoolean("sendpath", true))
+        val r = submit(p, old.sourceUrl, old.dest, 0L, old, old.fileName, old.fileName != null && Store.sp.getBoolean("sendpath", false))
         if (r is SubmitResult.Accepted) { DownloadRepo.update(id) { it.copy(superseded = true) }; d("Retry created attempt ${old.attempt + 1}") }
         return r
     }
@@ -164,6 +164,32 @@ object DownloadMonitor {
             submittedAt = if (it.tempPath == null) System.currentTimeMillis() else it.submittedAt, completedAt = 0) }
         d("${x.displayName}: monitoring resumed by user"); ensureLoop(x.ps4Id); startSvc()
     }
+    // ---------------- pause / resume through the ezRemote history file ----------------
+    // Pause writes failed_attempts = (Settings: 5), resume writes (Settings: 1) into bg_download_history.json. Only that number changes.
+    suspend fun pauseTransfer(id: String): String = bgSet(id, true)
+    suspend fun resumeTransfer(id: String): String = bgSet(id, false)
+    private suspend fun bgSet(id: String, pause: Boolean): String = withContext(Dispatchers.IO) {
+        val dl = DownloadRepo.get(id) ?: return@withContext tr("Download not found.", "التحميل غير موجود.")
+        val p = Ps4Repo.get(dl.ps4Id) ?: return@withContext tr("That PS4 profile no longer exists.", "ملف هذا الـPS4 لم يعد موجودًا.")
+        val s = Store.settings()
+        BgHistory.refresh(p, s)
+        val e = BgHistory.match(dl) ?: return@withContext tr("This download was not found in the ezRemote history file.", "لم يُعثر على هذا التحميل في ملف سجل ezRemote.")
+        val v = if (pause) Store.sp.getInt("bgpause", 5) else Store.sp.getInt("bgresume", 1)
+        BgHistory.setFailed(p, e.id, v, s)?.let { return@withContext it }
+        d("${dl.displayName}: failed_attempts set to $v (${if (pause) "pause" else "resume"})")
+        if (pause) DownloadRepo.update(id) { it.copy(state = DlState.PAUSED, note = "Paused by you through the ezRemote history file.", speed = 0.0, etaSec = -1) }
+        else {
+            rts.remove(id)
+            if (!dl.state.active) resume(id)
+            else DownloadRepo.update(id) { it.copy(state = if (it.tempPath != null) DlState.STARTING else DlState.WAITING_FOR_START,
+                note = "Resume requested through the ezRemote history file.", errorMessage = null) }
+        }
+        ensureLoop(dl.ps4Id); startSvc(); kick(); syncNotifs()
+        if (pause) tr("failed_attempts = $v was written and verified. If the PS4 keeps downloading, ezRemote has not re-read the file yet.",
+                      "كُتبت القيمة failed_attempts = $v وتم التحقق منها. إن استمر الـPS4 في التحميل فهذا يعني أن ezRemote لم يعد قراءة الملف بعد.")
+        else tr("failed_attempts = $v was written and verified. Waiting for the download to grow…", "كُتبت القيمة failed_attempts = $v وتم التحقق منها. بانتظار نمو التحميل…")
+    }
+
     fun stop(id: String) {
         val x = DownloadRepo.get(id) ?: return
         DownloadRepo.update(id) { it.copy(state = DlState.STOPPED, note = "Monitoring stopped by you. The PS4 download itself is not cancelled.", speed = 0.0, etaSec = -1) }
@@ -261,6 +287,7 @@ object DownloadMonitor {
             if (failed) { onFailure(p, st, s); wait = maxOf(wait, minOf(s.interval * 1000L shl minOf(st.failStreak, 4), 30_000L)) }
             else {
                 onSuccess(p, st)
+                runCatching { BgHistory.refresh(p, s) }          // exact size / failed_attempts from ezRemote's own file (never affects the failure counters)
                 try { process(p, listings, s) } catch (e: CancellationException) { throw e } catch (e: Exception) { d("Process error: ${e.javaClass.simpleName}: ${e.message}") }
             }
             if (watched(ps4Id).all { it.state == DlState.NOT_STARTED }) wait = maxOf(wait, 10_000L)
@@ -365,8 +392,21 @@ object DownloadMonitor {
         untracked.update { m -> m + (p.id to (m[p.id].orEmpty().filter { it.first != dir } + left.map { dir to it })) }
     }
 
+    /** Exact total size from ezRemote's own history file (unless the user typed a size). Returns the up-to-date record. */
+    private fun applyBg(d0: Download): Download {
+        val bg = BgHistory.match(d0) ?: return d0
+        if (bg.fileSize > 0 && !d0.expectedSource.startsWith("entered") && d0.expectedSize != bg.fileSize) {
+            DownloadRepo.update(d0.id) { it.copy(expectedSize = bg.fileSize, expectedSource = "ezRemote history file (size confirmed)") }
+            d("${d0.displayName}: exact size from the ezRemote history file: ${Fmt.bytes(bg.fileSize)}")
+            return DownloadRepo.get(d0.id) ?: d0
+        }
+        return d0
+    }
+
     private fun step(p: Ps4, d0: Download, entries: List<FsEntry>, s: Settings, now: Long) {
         val rt = rts.getOrPut(d0.id) { Rt(d0) }
+        val dl = applyBg(d0)
+        val bg = BgHistory.match(dl)
         val dir = norm(d0.dest)
         val byName = entries.associateBy { it.name }
 
@@ -427,8 +467,8 @@ object DownloadMonitor {
         if (cur > rt.peak) rt.peak = cur
         rt.speeds = (rt.speeds + cur.toFloat()).takeLast(maxOf(30, 300 / s.interval))
         rt.lastSize = size
-        val exp = d0.expectedSize?.takeIf { it > 0 }
-        val margin = if (d0.expectedSource.contains("confirmed") || d0.expectedSource.contains("agrees")) (1L shl 16) else maxOf(1L shl 20, (exp ?: 0L) / 1000)
+        val exp = dl.expectedSize?.takeIf { it > 0 }
+        val margin = if (dl.expectedSource.contains("confirmed") || dl.expectedSource.contains("agrees")) (1L shl 16) else maxOf(1L shl 20, (exp ?: 0L) / 1000)
         val eta = if (exp != null && size < exp && avg > 1.0) ((exp - size) / avg).toLong() else -1L      // never a fake ETA
         val atExp = exp != null && size >= exp - margin
 
@@ -436,6 +476,7 @@ object DownloadMonitor {
         val stalledMs = now - rt.lastGrow
         if (atExp) { st = DlState.VERIFYING; note = "Expected size reached — waiting for the PS4 to finish the file…"
             if (rt.unchanged >= 3 && rt.expStableSince == 0L) rt.expStableSince = now }
+        else if (bg != null && bg.failed >= BgHistory.detect() && cur <= 0.0) { st = DlState.PAUSED; note = "ezRemote stopped this download (failed_attempts reached the limit). Press Resume." }
         else if (rt.unchanged >= 3 && stalledMs >= s.stuck * 1000L) { st = DlState.STALLED; note = "No download progress detected for ${stalledMs / 1000} s." }
         else if (rt.grew) { st = DlState.DOWNLOADING; note = "" }
         else { st = DlState.STARTING; note = "File detected; waiting for data…" }
@@ -480,6 +521,39 @@ object DownloadMonitor {
     private fun complete(d0: Download, size: Long, why: String) {
         transition(d0, DlState.COMPLETED, why, f = { it.copy(currentSize = size, completedAt = System.currentTimeMillis(), speed = 0.0, etaSec = -1) })
         ev("${d0.displayName}: completed")
+        scope.launch {
+            if (Store.sp.getBoolean("autopkg", true) && DownloadRepo.get(d0.id)?.finalPath?.lowercase()?.endsWith(".pkg") == false) d("Auto .pkg: " + renamePkg(d0.id))
+            if (Store.sp.getBoolean("autoinstall", false)) {
+                val f = DownloadRepo.get(d0.id)?.finalPath; val p = Ps4Repo.get(d0.ps4Id)
+                if (f != null && p != null && f.lowercase().endsWith(".pkg")) { d("Auto install: " + Ops.install(p, listOf(f))); ev("${d0.displayName}: install requested") }
+            }
+        }
+    }
+
+    /**
+     * A finished file that really is a PS4 PKG (magic checked) but has no ".pkg" name gets ".pkg" appended through ezRemote
+     * POST /__local__/rename. ezRemote ignores the rename result, so success is only reported after listing the folder again.
+     */
+    suspend fun renamePkg(id: String): String = withContext(Dispatchers.IO) {
+        val dl = DownloadRepo.get(id) ?: return@withContext tr("Download not found.", "التحميل غير موجود.")
+        val p = Ps4Repo.get(dl.ps4Id) ?: return@withContext tr("That PS4 profile no longer exists.", "ملف هذا الـPS4 لم يعد موجودًا.")
+        val path = dl.finalPath ?: return@withContext tr("The finished file is not known yet.", "الملف المكتمل غير معروف بعد.")
+        if (path.lowercase().endsWith(".pkg")) return@withContext tr("The name already ends with .pkg.", "الاسم ينتهي بـ .pkg بالفعل.")
+        if (!PkgInspector.httpOn(p)) return@withContext tr("Renaming uses the ezRemote web connection, which is off for this PS4.", "إعادة التسمية تستخدم اتصال ويب ezRemote وهو متوقف لهذا الجهاز.")
+        val isPkg = try { PkgInspector.isPkg(p, path) } catch (e: Exception) { return@withContext Tx.t(PkgInspector.friendly(e)) }
+        if (!isPkg) return@withContext tr("This file is not a PS4 PKG, so it was not renamed.", "هذا الملف ليس PKG للـPS4 لذلك لم تُغيَّر تسميته.")
+        val dir = path.substringBeforeLast('/', "/").ifEmpty { "/" }; val name = path.substringAfterLast('/'); val newName = "$name.pkg"
+        val before = try { PkgInspector.browse(p, dir).map { it.name }.toSet() } catch (e: Exception) { return@withContext Tx.t(PkgInspector.friendly(e)) }
+        if (newName in before) return@withContext tr("A file named $newName already exists.", "يوجد ملف باسم $newName بالفعل.")
+        val target = (if (dir == "/") "" else dir) + "/" + newName
+        try { val r = EzRemote.rename(p, path, target, Store.settings().timeout * 1000); d("ezRemote rename: ok=${r.ok} ${r.message}") }
+        catch (e: Exception) { return@withContext Tx.t(EzRemote.friendly(e)) }
+        val after = try { PkgInspector.browse(p, dir).map { it.name }.toSet() } catch (e: Exception) { emptySet() }
+        if (newName in after && name !in after) {
+            DownloadRepo.update(id) { it.copy(finalPath = target, note = tr("Renamed to $newName", "أُعيدت تسميته إلى $newName")) }
+            d("Renamed on PS4: $name -> $newName"); ev("${dl.displayName}: renamed to .pkg")
+            tr("Renamed to $newName", "أُعيدت تسميته إلى $newName")
+        } else tr("The PS4 did not rename the file.", "لم يُعد الـPS4 تسمية الملف.")
     }
 
     /** Deletes the file(s) of a download from the PS4 (FTP DELE). Optionally removes the record too. Returns a message for the user. */
@@ -509,7 +583,7 @@ object DownloadMonitor {
     private val pps = ConcurrentHashMap<String, PP>()
 
     private fun maybeProbe(p: Ps4, dl: Download, path: String, size: Long, now: Long) {
-        if (!PkgInspector.ftpOn(p) || size < PkgFormat.HEADER_MIN) return
+        if (!PkgInspector.canRead(p) || size < PkgFormat.HEADER_MIN) return
         val st = pps.getOrPut(dl.id) { PP() }
         if (st.done || st.running || now < st.nextAt) return
         st.running = true; st.attempts++

@@ -35,9 +35,30 @@ Old Engine.kt / Sender.kt (template "Learn" workflow) were removed.
 - Delete ON THE PS4 (FTP DELE/RMD): Files screen, Home (untracked .tmp), Downloads ("Also delete the file(s) from the PS4"). Re-lists the folder afterwards to confirm. Extra red warning outside the PS4's download folder.
 - Stopping a running transfer on the PS4 is NOT possible with confirmed ezRemote APIs; deleting the partial file is best effort and the UI says so.
 
-## 2.4
-- Library tab (LibraryUi.kt): an index of the .pkg files on the PS4 (folder + sub-folders up to 3 levels, default = the PS4's download folder; change it with the folder button). Saved on the phone, refreshed with the refresh button.
-- Alphabetical list with letter headers and a quick-jump letter strip; Arabic and Latin are grouped separately (the app language decides which comes first).
-- Side rail by type: Games / Updates / DLC / Other / Unscanned. The type comes from the PKG's own param.sfo CATEGORY (read by Pkg.kt); files never read show as Unscanned until you press the image button (it reads title, icon and type over FTP, one file at a time).
-- Flexible search: every word may match as a prefix, a part of a word, or with 1-2 typos; it also matches the file name and the title id.
-- Tapping an item opens the existing PKG inspector. NOT compiled or tested yet (no Android SDK here); expect to fix a few compile errors on first sync.
+## 2.4 (after reading ezRemote http_server.cpp)
+- /__local__/list envelope confirmed: {"result":[{name,rights,date,size(string),type:"dir"|"file"}]}; "date" now parsed.
+- PKG reads go through GET /__local__/downloadFile?path= with a Range header (FTP REST as fallback) => no FTP needed for icons / size / inspector. Range support depends on the ezRemote build (unverified).
+- Delete on PS4 uses POST /__local__/remove {"items":[...]} (recursive!) with FTP fallback; always verified by re-listing; refuses top-level folders.
+- Finished PKG without ".pkg" is renamed via POST /__local__/rename {"item","newItemPath"} after a magic check; verified by listing (ezRemote ignores the rename result). Toggle in Settings > Advanced.
+- "Send file name in dest" is now OFF by default: how the internal downloader treats dest_path is not in http_server.cpp.
+- Never used: GET /stop (stops the whole ezRemote web server).
+
+## 2.5
+- Artwork now loads by itself everywhere (Files rows, Downloads cards/detail, Home): PkgThumbs reads the PKG header on demand, one read at a time, disk-cached, failures remembered (no repeated hits while scrolling). Old/completed downloads get their icon and title the first time they are shown.
+
+## 3.0 — everything http_server.cpp offers that makes sense for a download companion
+- Install a .pkg on the PS4 (POST /__local__/install) from Files, the PKG inspector and finished downloads; optional auto-install (off by default).
+- Install directly from a link (POST /__local__/install_url, enable_rpi, no disk copy) from the send dialog.
+- Files: new folder (createFolder), rename (rename), copy / cut / paste (copy, move) with overwrite warning, extract zip/rar/7z (extract), delete (remove), save a PS4 file to the phone (downloadFile via DownloadManager).
+- Upload from the phone (multipart /__local__/upload, 8 MiB chunks, resume via uploadResumeSize, size verified at the end).
+- Text viewer/editor (getContent / edit, <= 256 KB).
+- uploadResumeSize is used as a cheap single-file size query.
+- Long operations (Ops.kt) run in an app-level scope with the foreground service; one at a time; results verified by listing because ezRemote ignores several return values.
+- Deliberately NOT used: GET /stop (stops ezRemote), POST /compress (writes to its own folder, ignores `destination`, can answer twice), copy with `singleFilename` (only handles folders), /permission (unsupported).
+
+## 3.1 — ezRemote history file (bg_download_history.json)
+- BgHistory.kt reads ezRemote's own queue file (web getContent first, FTP fallback). The path is found automatically in /data (or set it in Settings > Advanced).
+- Exact total size (file_size) now replaces the guessed size; the download detail shows file size, bytes recorded by ezRemote, failed_attempts, state and id.
+- New state "Paused": shown when failed_attempts >= the limit (default 5, configurable) and the file is not growing.
+- Pause / Resume buttons (download detail): write failed_attempts = 5 / 1 into that single entry only (text-level patch, other bytes untouched), verify by reading again, keep a backup copy on the phone (files/bg_download_history.backup.json).
+- NOT compiled or tested here. Unknown until tested on your PS4: whether ezRemote notices a value written while it is running, and the meaning of the "state" numbers. The log (Settings > Advanced > Debug log) records every read/write.

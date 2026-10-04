@@ -105,15 +105,19 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
     val all by DownloadRepo.all.collectAsState()
     val untracked by DownloadMonitor.untracked.collectAsState()
     val d = all.firstOrNull { it.id == id }
+    val bgMap by BgHistory.entries.collectAsState()
+    val bgStatus by BgHistory.status.collectAsState()
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     var confirm by remember { mutableStateOf<Pair<List<String>, Boolean>?>(null) }
+    var confirmInstall by remember { mutableStateOf(false) }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BackHeader(tr("Download", "التحميل"), nav)
         if (d == null) { Text(tr("This download was removed.", "تم حذف هذا التحميل.")); return@Column }
         val ps4 = Ps4Repo.get(d.ps4Id)
+        val hist = bgMap[d.ps4Id]?.let { BgHistory.match(d, it) }
         val (bg, fg) = stateColors(d.state)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            val art by produceState<Bitmap?>(null, d.id, d.iconReady) { value = if (d.iconReady) withContext(Dispatchers.IO) { PkgStore.bitmap("d:${d.id}", "icon0.png", 256) } else null }
+            val art by produceState<Bitmap?>(null, d.id, d.iconReady, d.tempPath, d.finalPath) { value = PkgThumbs.forDownload(d, 256) }
             val pic = art
             if (pic != null) Image(pic.asImageBitmap(), null, Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)), contentScale = ContentScale.Crop)
             else Box(Modifier.size(52.dp).clip(RoundedCornerShape(16.dp)).background(bg), contentAlignment = Alignment.Center) { Ico(stateIcon(d.state), 28.dp, fg) }
@@ -150,6 +154,13 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
             Text(tr("Average (30 s): ", "المتوسط (30 ث): ") + "${Fmt.mbs(d.avgSpeed)}   " + tr("Peak: ", "الأعلى: ") + Fmt.mbs(d.peakSpeed))
             if (d.speeds.size > 1) Chart(d.speeds.map { it / 1048576f }, Modifier.fillMaxWidth().height(120.dp))
         }
+        if (hist != null) Panel {
+            Text(tr("ezRemote history file", "ملف سجل ezRemote"), fontWeight = FontWeight.SemiBold)
+            Text(tr("File size: ", "حجم الملف: ") + Fmt.bytes(hist.fileSize))
+            Text(tr("Recorded by ezRemote: ", "المسجَّل لدى ezRemote: ") + Fmt.bytes(hist.transferred) + (hist.pct?.let { "  ($it%)" } ?: ""))
+            Text("failed_attempts: ${hist.failed}   •   state: ${hist.state}")
+            Dim("id ${hist.id}")
+        } else if (d.state.active) bgStatus[d.ps4Id]?.takeIf { it.isNotBlank() }?.let { Dim(it) }
         if (d.tempPath == null && d.state.active) {
             val dir = DownloadMonitor.norm(d.dest)
             val cands = untracked[d.ps4Id].orEmpty().filter { it.first == dir }
@@ -171,18 +182,29 @@ private fun stopToast(ctx: android.content.Context) = Toast.makeText(ctx, tr("Mo
             Dim(tr("Sent: ", "أُرسل: ") + Fmt.dt(d.submittedAt) + "   " + tr("Started: ", "بدأ: ") + Fmt.dt(d.startedAt) + "   " + tr("Finished: ", "انتهى: ") + Fmt.dt(d.completedAt))
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (hist != null && (d.state.active || hist.failed >= BgHistory.detect())) {
+                if (d.state == DlState.PAUSED || hist.failed >= BgHistory.detect())
+                    Button(onClick = { scope.launch { Toast.makeText(ctx, DownloadMonitor.resumeTransfer(d.id), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_refresh, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Resume download", "استئناف التحميل")) }
+                else
+                    FilledTonalButton(onClick = { scope.launch { Toast.makeText(ctx, DownloadMonitor.pauseTransfer(d.id), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_stop, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Pause download", "إيقاف التحميل مؤقتًا")) }
+            }
             if (d.state.active) FilledTonalButton(onClick = { DownloadMonitor.stop(d.id); stopToast(ctx) }) { Ico(R.drawable.ic_stop, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Stop", "إيقاف")) }
             if (!d.superseded && d.sourceUrl.isNotBlank() && d.state in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED))
                 Button(onClick = { scope.launch { Toast.makeText(ctx, resultText(DownloadMonitor.retry(d.id)), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_refresh, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Retry", "إعادة المحاولة")) }
             if (!d.superseded && d.state in setOf(DlState.NOT_STARTED, DlState.FAILED, DlState.STOPPED))
                 OutlinedButton(onClick = { DownloadMonitor.resume(d.id) }) { Lbl(tr("Resume monitoring", "استئناف المراقبة")) }
+            if (d.state == DlState.COMPLETED && d.finalPath != null && !d.finalPath.lowercase().endsWith(".pkg"))
+                FilledTonalButton(onClick = { scope.launch { Toast.makeText(ctx, DownloadMonitor.renamePkg(d.id), Toast.LENGTH_LONG).show() } }) { Ico(R.drawable.ic_package, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Add .pkg", "إضافة .pkg")) }
+            if (d.state == DlState.COMPLETED && ps4 != null && PkgInspector.httpOn(ps4) && d.finalPath?.lowercase()?.endsWith(".pkg") == true)
+                Button(onClick = { confirmInstall = true }) { Ico(R.drawable.ic_install, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Install", "تثبيت")) }
             OutlinedButton(onClick = { confirm = listOf(d.id) to false }) { Ico(R.drawable.ic_delete, 18.dp, MaterialTheme.colorScheme.error); Spacer(Modifier.width(6.dp)); Lbl(tr("Delete", "حذف"), color = MaterialTheme.colorScheme.error) }
             if (d.tempPath != null || d.finalPath != null) Button(onClick = { confirm = listOf(d.id) to true }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Ico(R.drawable.ic_delete, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Delete from PS4", "حذف من الـPS4")) }
-            if (ps4 != null && PkgInspector.ftpOn(ps4) && (d.tempPath ?: d.finalPath) != null && (d.iconReady || (d.finalPath ?: d.tempPath).orEmpty().lowercase().contains("pkg") || d.displayName.lowercase().endsWith(".pkg")))
+            if (ps4 != null && PkgInspector.canRead(ps4) && (d.tempPath ?: d.finalPath) != null && (d.iconReady || (d.finalPath ?: d.tempPath).orEmpty().lowercase().contains("pkg") || d.displayName.lowercase().endsWith(".pkg")))
                 FilledTonalButton(onClick = { nav.navigate(pkgRoute(ps4.id, d.finalPath ?: d.tempPath!!)) }) { Ico(R.drawable.ic_package, 18.dp); Spacer(Modifier.width(6.dp)); Lbl(tr("Inside the PKG", "ما بداخل الـPKG")) }
         }
         if (d.state.active) Dim(tr("“Stop” only stops this app from watching; it does not cancel the download on the PS4 (ezRemote has no confirmed cancel API). Retry sends a NEW request and is never automatic.",
             "«إيقاف» يوقف مراقبة التطبيق فقط ولا يلغي التحميل على الـPS4 (لا يوجد API مؤكد للإلغاء في ezRemote). إعادة المحاولة ترسل طلبًا جديدًا ولا تتم تلقائيًا."))
     }
+    if (confirmInstall) { val p = Ps4Repo.get(d?.ps4Id); val f = d?.finalPath; if (p != null && f != null) ConfirmInstall(p, listOf(f), close = { confirmInstall = false }) }
     confirm?.let { (ids, also) -> ConfirmDelete(ids, onDone = { nav.popBackStack() }, close = { confirm = null }, defaultAlsoPs4 = also) }
 }

@@ -66,7 +66,6 @@ class MainActivity : ComponentActivity() {
 }
 
 private val TABS = listOf(Triple("home", R.drawable.ic_home, "Home" to "الرئيسية"), Triple("browser", R.drawable.ic_globe, "Browser" to "المتصفح"),
-    Triple("library", R.drawable.ic_library, "Library" to "المكتبة"),
     Triple("downloads", R.drawable.ic_download, "Downloads" to "التحميلات"), Triple("settings", R.drawable.ic_settings, "Settings" to "الإعدادات"))
 
 @Composable fun AppNav() {
@@ -88,10 +87,11 @@ private val TABS = listOf(Triple("home", R.drawable.ic_home, "Home" to "الرئ
         NavHost(nav, startDestination = "home", modifier = Modifier.padding(pad)) {
             composable("home") { HomeScreen(nav) }
             composable("browser") { BrowserScreen() }
-            composable("library") { LibraryScreen(nav) }
             composable("downloads") { DownloadsScreen(nav) }
             composable("downloads/{id}", listOf(navArgument("id") { type = NavType.StringType })) { DownloadDetail(it.arguments?.getString("id").orEmpty(), nav) }
             composable("files") { FilesScreen(nav) }
+            composable("text/{ps4}/{path}", listOf(navArgument("ps4") { type = NavType.StringType }, navArgument("path") { type = NavType.StringType })) {
+                TextScreen(it.arguments?.getString("ps4").orEmpty(), it.arguments?.getString("path").orEmpty(), nav) }
             composable("pkg/{ps4}/{path}", listOf(navArgument("ps4") { type = NavType.StringType }, navArgument("path") { type = NavType.StringType })) {
                 PkgScreen(it.arguments?.getString("ps4").orEmpty(), it.arguments?.getString("path").orEmpty(), nav) }
             composable("settings") { SettingsScreen(nav) }

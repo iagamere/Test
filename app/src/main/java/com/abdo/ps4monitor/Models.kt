@@ -32,6 +32,7 @@ enum class DlState(private val en: String, private val ar: String, val active: B
     STARTING("Starting", "جارٍ البدء", true),
     DOWNLOADING("Downloading", "جارٍ التحميل", true),
     STALLED("Stalled", "متعثّر", true),
+    PAUSED("Paused", "متوقف مؤقتًا", true),                 // ezRemote history file says failed_attempts >= limit (or the user paused it)
     CONNECTION_LOST("Connection lost", "انقطع الاتصال", true),
     VERIFYING("Verifying", "جارٍ التحقق", true),
     COMPLETED("Completed", "اكتمل", false),

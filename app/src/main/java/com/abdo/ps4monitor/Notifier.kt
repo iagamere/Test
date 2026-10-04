@@ -44,6 +44,7 @@ object Notifier {
         val detail = when (d.state) {
             DlState.DOWNLOADING -> listOfNotNull(d.pct?.let { "$it%" }, Fmt.mbs(d.speed), if (d.etaSec >= 0) "ETA ${Fmt.dur(d.etaSec)}" else null).joinToString(" • ")
             DlState.STALLED -> tr("Download stalled", "التحميل متعثّر")
+            DlState.PAUSED -> tr("Download paused", "التحميل متوقف مؤقتًا")
             DlState.CONNECTION_LOST -> tr("PS4 monitoring connection interrupted. Reconnecting…", "انقطع اتصال المراقبة. جارٍ إعادة الاتصال…")
             DlState.QUEUED, DlState.WAITING_FOR_START -> tr("Waiting for PS4 download to start…", "بانتظار أن يبدأ الـPS4 التحميل…")
             DlState.STARTING -> tr("Starting…", "جارٍ البدء…")

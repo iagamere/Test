@@ -9,6 +9,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -105,8 +109,13 @@ private fun go(nav: NavController, r: String) = nav.navigate(r) { popUpTo(nav.gr
             item { Dim(tr("These .tmp files are not tracked by this app (for example started directly in ezRemote).", "ملفات .tmp هذه غير متابَعة من التطبيق (مثلًا بدأت مباشرة من ezRemote).")) }
             items(loose, key = { it.first + "/" + it.second.name }) { (dir, e) ->
                 Card(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-                    Row(Modifier.padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) { Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis); Dim(Fmt.bytes(e.size)) }
+                    Row(Modifier.padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        val th by produceState<Thumb?>(null, dir, e.name, e.size) { value = ps4?.let { PkgThumbs.get(it, joinPath(dir, e.name), e.size, 96) } }
+                        Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+                            val b = th?.bmp
+                            if (b != null) Image(b.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else Ico(R.drawable.ic_schedule, 22.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Column(Modifier.weight(1f)) { Text(th?.title ?: e.name, maxLines = 1, overflow = TextOverflow.Ellipsis); Dim(Fmt.bytes(e.size)) }
                         TextButton(onClick = { ps4?.let { DownloadMonitor.adopt(it.id, dir, e) } }) { Lbl(tr("Monitor", "مراقبة")) }
                         IconButton(onClick = { delTmp = dir to e }) { Ico(R.drawable.ic_delete, 22.dp, MaterialTheme.colorScheme.onSurfaceVariant) }
                     }

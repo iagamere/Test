@@ -2,9 +2,10 @@ package com.abdo.ps4monitor
 import java.io.IOException
 
 /**
- * Deleting files ON THE PS4. Uses plain FTP (DELE / RMD). The ezRemote "/__local__/remove" endpoint exists but its request body is not
- * confirmed from source, so it is deliberately NOT used.
- * There is no confirmed ezRemote call that cancels a running download; deleting the partial file is the only lever this app has.
+ * Deleting files ON THE PS4.
+ * Primary: ezRemote POST /__local__/remove {"items":[...]} (confirmed in http_server.cpp; recursive, so folders go with their content).
+ * Fallback: FTP DELE / RMD (folders only if empty). Every result is verified by listing the parent folder again.
+ * There is still no confirmed call that cancels a running transfer. (GET /stop in that file stops the whole ezRemote web server: never used.)
  */
 object Remote {
     class Item(val path: String, val isDir: Boolean)
@@ -13,33 +14,53 @@ object Remote {
     /** True when [path] is not inside the PS4's configured download folder: probably not a file the user downloaded. */
     fun outside(p: Ps4, path: String): Boolean { val base = DownloadMonitor.norm(p.dest); return !(path == base || path.startsWith("$base/")) }
 
-    fun delete(p: Ps4, items: List<Item>, recheckDelayMs: Long = 0): Outcome {
-        if (!PkgInspector.ftpOn(p)) throw IOException("Deleting files on the PS4 needs FTP. Enable the FTP port for this PS4.")
-        val s = Store.settings()
-        val f = Ftp.connect(Conn(p.host, p.ftpPort, p.ftpUser, p.ftpPass), s)
-        val ok = ArrayList<String>(); val failed = ArrayList<Pair<String, String>>()
-        try {
-            for (item in items) {
-                val good = try { if (item.isDir) f.removeDirectory(item.path) else f.deleteFile(item.path) } catch (e: IOException) { false }
-                if (good) { ok += item.path; DownloadMonitor.d("Deleted on PS4: ${item.path}") }
-                else { val why = f.replyString.orEmpty().trim().take(100).ifBlank { "refused" }; failed += item.path to why; DownloadMonitor.d("Delete refused: ${item.path} ($why)") }
-            }
-        } finally { runCatching { f.logout() }; runCatching { f.disconnect() } }
-        if (recheckDelayMs > 0 && ok.isNotEmpty()) Thread.sleep(recheckDelayMs)
-        // Evidence, not assumption: list the parent folders again and report anything that is back.
-        val back = ArrayList<String>()
-        ok.groupBy { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.forEach { (dir, paths) ->
-            val names = runCatching { PkgInspector.browse(p, dir).map { it.name }.toSet() }.getOrNull() ?: return@forEach
-            paths.filter { it.substringAfterLast('/') in names }.forEach { back += it }
+    private fun presentAfter(p: Ps4, paths: List<String>): Set<String>? {
+        val out = HashSet<String>()
+        for ((dir, ps) in paths.groupBy { it.substringBeforeLast('/', "/").ifEmpty { "/" } }) {
+            val names = try { PkgInspector.browse(p, dir).map { it.name }.toSet() } catch (e: Exception) { return null }
+            ps.filter { it.substringAfterLast('/') in names }.forEach { out += it }
         }
-        if (back.isNotEmpty()) DownloadMonitor.d("Still present after delete: ${back.joinToString()}")
-        return Outcome(ok - back.toSet(), failed, back)
+        return out
+    }
+
+    fun delete(p: Ps4, items: List<Item>, recheckDelayMs: Long = 0): Outcome {
+        if (!PkgInspector.canRead(p)) throw IOException("No web or FTP connection is enabled for this PS4.")
+        val paths = items.map { it.path }.distinct()
+        if (paths.any { it.trim('/').split('/').filter { s -> s.isNotEmpty() }.size < 2 }) throw IOException("Refusing to delete a top-level system folder.")
+        val s = Store.settings()
+        var why = ""; var httpOk = false
+        if (PkgInspector.httpOn(p)) {
+            try { val r = EzRemote.remove(p, paths, s.timeout * 1000); httpOk = r.ok; if (!r.ok) why = r.message
+                DownloadMonitor.d("ezRemote remove (${paths.size}): ${if (r.ok) "ok" else r.message}") }
+            catch (e: Exception) { why = EzRemote.friendly(e); DownloadMonitor.d("ezRemote remove error: ${e.javaClass.simpleName}: ${e.message}") }
+        }
+        var left = presentAfter(p, paths)                       // null = could not verify
+        val todo = left ?: paths.toSet()
+        if (PkgInspector.ftpOn(p) && (todo.isNotEmpty() && (left != null || !httpOk))) {
+            val f = try { Ftp.connect(Conn(p.host, p.ftpPort, p.ftpUser, p.ftpPass), s) } catch (e: Exception) { null }
+            if (f != null) try {
+                for (item in items.filter { it.path in todo }) {
+                    val good = try { if (item.isDir) f.removeDirectory(item.path) else f.deleteFile(item.path) } catch (e: IOException) { false }
+                    if (good) DownloadMonitor.d("Deleted on PS4 (FTP): ${item.path}") else { why = f.replyString.orEmpty().trim().take(100).ifBlank { why }; DownloadMonitor.d("FTP delete refused: ${item.path} ($why)") }
+                }
+            } finally { runCatching { f.logout() }; runCatching { f.disconnect() } }
+            left = presentAfter(p, paths)
+        }
+        val stillThere: Set<String> = left ?: if (httpOk) emptySet() else paths.toSet()     // unverifiable: trust the answer
+        var back = emptyList<String>()
+        if (recheckDelayMs > 0 && stillThere.size < paths.size) {
+            Thread.sleep(recheckDelayMs)
+            val again = presentAfter(p, paths)
+            if (again != null) back = (again - stillThere).toList()
+        }
+        if (back.isNotEmpty()) DownloadMonitor.d("Reappeared after delete: ${back.joinToString()}")
+        return Outcome(paths.filter { it !in stillThere && it !in back }, stillThere.map { it to why.ifBlank { "still present" } }, back)
     }
 
     fun summary(o: Outcome): String {
         val parts = ArrayList<String>()
         if (o.deleted.isNotEmpty()) parts += tr("Deleted ${o.deleted.size} item(s) from the PS4.", "حُذف ${o.deleted.size} عنصر من الـPS4.")
-        o.failed.forEach { parts += it.first.substringAfterLast('/') + ": " + it.second }
+        o.failed.forEach { parts += it.first.substringAfterLast('/') + ": " + Tx.t(it.second) }
         if (o.reappeared.isNotEmpty()) parts += tr("${o.reappeared.size} item(s) are still present on the PS4.", "${o.reappeared.size} عنصر ما زال موجودًا على الـPS4.")
         return parts.joinToString("\n").ifBlank { tr("Nothing was deleted.", "لم يُحذف شيء.") }
     }
